@@ -1,0 +1,669 @@
+{
+  "table_to_view": {
+    "conductor": "music_conductor",
+    "orchestra": "music_orchestra",
+    "performance": "music_performance",
+    "show": "music_show",
+    "airlines": "flight_airline",
+    "airports": "flight_airport",
+    "flights": "airline_flight",
+    "Highschooler": "high_schooler",
+    "Friend": "high_school_friend",
+    "Likes": "high_school_like",
+    "players": "tennis_player",
+    "matches": "tennis_match",
+    "rankings": "tennis_ranking",
+    "battle": "naval_battle",
+    "ship": "naval_ship",
+    "death": "naval_death",
+    "TV_Channel": "tv_broadcasting_channel",
+    "TV_series": "tv_episodic_series",
+    "Cartoon": "tv_cartoon",
+    "city": "world_city",
+    "country": "world_country",
+    "countrylanguage": "world_country_language",
+    "course": "school_course",
+    "teacher": "school_teacher",
+    "course_arrange": "school_course_arrangement",
+    "Ref_Feature_Types": "property_feature_type",
+    "Ref_Property_Types": "real_estate_type",
+    "Other_Available_Features": "property_available_feature",
+    "Properties": "real_estate_property",
+    "Other_Property_Features": "property_specific_feature",
+    "Ref_Template_Types": "document_template_type",
+    "Templates": "document_template",
+    "Documents": "managed_document",
+    "Paragraphs": "document_paragraph",
+    "continents": "car_continent",
+    "countries": "car_country",
+    "car_makers": "car_maker",
+    "model_list": "car_model",
+    "car_names": "car_name",
+    "cars_data": "automotive_data_specs",
+    "poker_player": "poker_player_record",
+    "people": "poker_person",
+    "Addresses": "university_address",
+    "Courses": "university_course",
+    "Departments": "university_department",
+    "Degree_Programs": "university_degree_program",
+    "Sections": "university_section",
+    "Semesters": "university_semester",
+    "Students": "university_student",
+    "Student_Enrolment": "university_enrollment",
+    "Student_Enrolment_Courses": "university_enrolled_course",
+    "Transcripts": "university_transcript",
+    "Transcript_Contents": "university_transcript_content",
+    "Breeds": "dog_breed",
+    "Charges": "vet_charge",
+    "Sizes": "dog_size",
+    "Treatment_Types": "vet_treatment_type",
+    "Owners": "dog_owner",
+    "Dogs": "vet_dog",
+    "Professionals": "vet_professional",
+    "Treatments": "vet_treatment",
+    "Student": "pet_student",
+    "Has_Pet": "student_pet_link",
+    "Pets": "student_pet",
+    "employee": "retail_employee",
+    "shop": "retail_shop",
+    "hiring": "retail_hiring",
+    "evaluation": "retail_evaluation",
+    "AREA_CODE_STATE": "state_area_code",
+    "CONTESTANTS": "voting_contestant",
+    "VOTES": "contestant_vote",
+    "stadium": "concert_stadium",
+    "singer": "concert_singer",
+    "concert": "music_concert",
+    "singer_in_concert": "concert_singer_link",
+    "museum": "museum_entity",
+    "visitor": "museum_visitor",
+    "visit": "museum_visit"
+  },
+  "column_mapping": {
+    "music_conductor": {
+      "conductor_id": "Conductor_ID",
+      "name": "Name",
+      "age": "Age",
+      "nationality": "Nationality",
+      "year_of_work": "Year_of_Work"
+    },
+    "music_orchestra": {
+      "orchestra_id": "Orchestra_ID",
+      "orchestra_name": "Orchestra",
+      "conductor_id": "Conductor_ID",
+      "record_company": "Record_Company",
+      "year_of_founded": "Year_of_Founded",
+      "major_record_format": "Major_Record_Format"
+    },
+    "music_performance": {
+      "performance_id": "Performance_ID",
+      "orchestra_id": "Orchestra_ID",
+      "performance_type": "Type",
+      "performance_date": "Date",
+      "official_ratings_millions": "Official_ratings_(millions)",
+      "weekly_rank": "Weekly_rank",
+      "audience_share": "Share"
+    },
+    "music_show": {
+      "show_id": "Show_ID",
+      "performance_id": "Performance_ID",
+      "is_first_show": "If_first_show",
+      "show_result": "Result",
+      "attendance": "Attendance"
+    },
+    "flight_airline": {
+      "airline_id": "uid",
+      "airline_name": "Airline",
+      "abbreviation": "Abbreviation",
+      "country": "Country"
+    },
+    "flight_airport": {
+      "city": "City",
+      "airport_code": "AirportCode",
+      "airport_name": "AirportName",
+      "country": "Country",
+      "country_abbrev": "CountryAbbrev"
+    },
+    "airline_flight": {
+      "airline_id": "Airline",
+      "flight_number": "FlightNo",
+      "source_airport_code": "SourceAirport",
+      "dest_airport_code": "DestAirport"
+    },
+    "high_schooler": {
+      "student_id": "ID",
+      "name": "name",
+      "grade": "grade"
+    },
+    "high_school_friend": {
+      "student_id": "student_id",
+      "friend_id": "friend_id"
+    },
+    "high_school_like": {
+      "student_id": "student_id",
+      "liked_id": "liked_id"
+    },
+    "tennis_player": {
+      "player_id": "player_id",
+      "first_name": "first_name",
+      "last_name": "last_name",
+      "hand": "hand",
+      "birth_date": "birth_date",
+      "country_code": "country_code"
+    },
+    "tennis_match": {
+      "best_of": "best_of",
+      "draw_size": "draw_size",
+      "loser_age": "loser_age",
+      "loser_entry": "loser_entry",
+      "loser_hand": "loser_hand",
+      "loser_height": "loser_ht",
+      "loser_id": "loser_id",
+      "loser_ioc": "loser_ioc",
+      "loser_name": "loser_name",
+      "loser_rank": "loser_rank",
+      "loser_rank_points": "loser_rank_points",
+      "loser_seed": "loser_seed",
+      "match_num": "match_num",
+      "minutes": "minutes",
+      "round": "round",
+      "score": "score",
+      "surface": "surface",
+      "tourney_date": "tourney_date",
+      "tourney_id": "tourney_id",
+      "tourney_level": "tourney_level",
+      "tourney_name": "tourney_name",
+      "winner_age": "winner_age",
+      "winner_entry": "winner_entry",
+      "winner_hand": "winner_hand",
+      "winner_height": "winner_ht",
+      "winner_id": "winner_id",
+      "winner_ioc": "winner_ioc",
+      "winner_name": "winner_name",
+      "winner_rank": "winner_rank",
+      "winner_rank_points": "winner_rank_points",
+      "winner_seed": "winner_seed",
+      "year": "year"
+    },
+    "tennis_ranking": {
+      "ranking_date": "ranking_date",
+      "ranking": "ranking",
+      "player_id": "player_id",
+      "ranking_points": "ranking_points",
+      "tours": "tours"
+    },
+    "naval_battle": {
+      "battle_id": "id",
+      "name": "name",
+      "date": "date",
+      "bulgarian_commander": "bulgarian_commander",
+      "latin_commander": "latin_commander",
+      "result": "result"
+    },
+    "naval_ship": {
+      "lost_in_battle_id": "lost_in_battle",
+      "ship_id": "id",
+      "name": "name",
+      "tonnage": "tonnage",
+      "ship_type": "ship_type",
+      "location": "location",
+      "disposition_of_ship": "disposition_of_ship"
+    },
+    "naval_death": {
+      "caused_by_ship_id": "caused_by_ship_id",
+      "death_id": "id",
+      "note": "note",
+      "killed": "killed",
+      "injured": "injured"
+    },
+    "tv_broadcasting_channel": {
+      "channel_id": "id",
+      "series_name": "series_name",
+      "country": "Country",
+      "language": "Language",
+      "content": "Content",
+      "pixel_aspect_ratio": "Pixel_aspect_ratio_PAR",
+      "high_definition_tv": "Hight_definition_TV",
+      "pay_per_view": "Pay_per_view_PPV",
+      "package_option": "Package_Option"
+    },
+    "tv_episodic_series": {
+      "series_id": "id",
+      "episode": "Episode",
+      "air_date": "Air_Date",
+      "rating": "Rating",
+      "share": "Share",
+      "rating_share_18_49": "18_49_Rating_Share",
+      "viewers_millions": "Viewers_m",
+      "weekly_rank": "Weekly_Rank",
+      "channel_id": "Channel"
+    },
+    "tv_cartoon": {
+      "cartoon_id": "id",
+      "title": "Title",
+      "directed_by": "Directed_by",
+      "written_by": "Written_by",
+      "original_air_date": "Original_air_date",
+      "production_code": "Production_code",
+      "channel_id": "Channel"
+    },
+    "world_city": {
+      "city_id": "ID",
+      "name": "Name",
+      "country_code": "CountryCode",
+      "district": "District",
+      "population": "Population"
+    },
+    "world_country": {
+      "country_code": "Code",
+      "name": "Name",
+      "continent": "Continent",
+      "region": "Region",
+      "surface_area": "SurfaceArea",
+      "indep_year": "IndepYear",
+      "population": "Population",
+      "life_expectancy": "LifeExpectancy",
+      "gnp": "GNP",
+      "gnp_old": "GNPOld",
+      "local_name": "LocalName",
+      "government_form": "GovernmentForm",
+      "head_of_state": "HeadOfState",
+      "capital_city_id": "Capital",
+      "code2": "Code2"
+    },
+    "world_country_language": {
+      "country_code": "CountryCode",
+      "language": "Language",
+      "is_official": "IsOfficial",
+      "percentage": "Percentage"
+    },
+    "school_course": {
+      "course_id": "Course_ID",
+      "starting_date": "Staring_Date",
+      "course_name": "Course"
+    },
+    "school_teacher": {
+      "teacher_id": "Teacher_ID",
+      "name": "Name",
+      "age": "Age",
+      "hometown": "Hometown"
+    },
+    "school_course_arrangement": {
+      "course_id": "Course_ID",
+      "teacher_id": "Teacher_ID",
+      "grade": "Grade"
+    },
+    "property_feature_type": {
+      "feature_type_code": "feature_type_code",
+      "feature_type_name": "feature_type_name"
+    },
+    "real_estate_type": {
+      "property_type_code": "property_type_code",
+      "property_type_description": "property_type_description"
+    },
+    "property_available_feature": {
+      "feature_id": "feature_id",
+      "feature_type_code": "feature_type_code",
+      "feature_name": "feature_name",
+      "feature_description": "feature_description"
+    },
+    "real_estate_property": {
+      "property_id": "property_id",
+      "property_type_code": "property_type_code",
+      "date_on_market": "date_on_market",
+      "date_sold": "date_sold",
+      "property_name": "property_name",
+      "property_address": "property_address",
+      "room_count": "room_count",
+      "vendor_requested_price": "vendor_requested_price",
+      "buyer_offered_price": "buyer_offered_price",
+      "agreed_selling_price": "agreed_selling_price",
+      "apt_feature_1": "apt_feature_1",
+      "apt_feature_2": "apt_feature_2",
+      "apt_feature_3": "apt_feature_3",
+      "fld_feature_1": "fld_feature_1",
+      "fld_feature_2": "fld_feature_2",
+      "fld_feature_3": "fld_feature_3",
+      "hse_feature_1": "hse_feature_1",
+      "hse_feature_2": "hse_feature_2",
+      "hse_feature_3": "hse_feature_3",
+      "oth_feature_1": "oth_feature_1",
+      "oth_feature_2": "oth_feature_2",
+      "oth_feature_3": "oth_feature_3",
+      "shp_feature_1": "shp_feature_1",
+      "shp_feature_2": "shp_feature_2",
+      "shp_feature_3": "shp_feature_3",
+      "other_property_details": "other_property_details"
+    },
+    "property_specific_feature": {
+      "property_id": "property_id",
+      "feature_id": "feature_id",
+      "property_feature_description": "property_feature_description"
+    },
+    "document_template_type": {
+      "template_type_code": "Template_Type_Code",
+      "template_type_description": "Template_Type_Description"
+    },
+    "document_template": {
+      "template_id": "Template_ID",
+      "version_number": "Version_Number",
+      "template_type_code": "Template_Type_Code",
+      "date_effective_from": "Date_Effective_From",
+      "date_effective_to": "Date_Effective_To",
+      "template_details": "Template_Details"
+    },
+    "managed_document": {
+      "document_id": "Document_ID",
+      "template_id": "Template_ID",
+      "document_name": "Document_Name",
+      "document_description": "Document_Description",
+      "other_details": "Other_Details"
+    },
+    "document_paragraph": {
+      "paragraph_id": "Paragraph_ID",
+      "document_id": "Document_ID",
+      "paragraph_text": "Paragraph_Text",
+      "other_details": "Other_Details"
+    },
+    "car_continent": {
+      "continent_id": "ContId",
+      "continent": "Continent"
+    },
+    "car_country": {
+      "country_id": "CountryId",
+      "country_name": "CountryName",
+      "continent_id": "Continent"
+    },
+    "car_maker": {
+      "maker_id": "Id",
+      "maker": "Maker",
+      "full_name": "FullName",
+      "country_id": "Country"
+    },
+    "car_model": {
+      "model_id": "ModelId",
+      "maker_id": "Maker",
+      "model": "Model"
+    },
+    "car_name": {
+      "make_id": "MakeId",
+      "model": "Model",
+      "make": "Make"
+    },
+    "automotive_data_specs": {
+      "make_id": "Id",
+      "mpg": "MPG",
+      "cylinders": "Cylinders",
+      "edispl": "Edispl",
+      "horsepower": "Horsepower",
+      "weight": "Weight",
+      "accelerate": "Accelerate",
+      "year": "Year"
+    },
+    "poker_player_record": {
+      "poker_player_id": "Poker_Player_ID",
+      "person_id": "People_ID",
+      "final_table_made": "Final_Table_Made",
+      "best_finish": "Best_Finish",
+      "money_rank": "Money_Rank",
+      "earnings": "Earnings"
+    },
+    "poker_person": {
+      "person_id": "People_ID",
+      "nationality": "Nationality",
+      "name": "Name",
+      "birth_date": "Birth_Date",
+      "height": "Height"
+    },
+    "university_address": {
+      "address_id": "address_id",
+      "line_1": "line_1",
+      "line_2": "line_2",
+      "line_3": "line_3",
+      "city": "city",
+      "zip_postcode": "zip_postcode",
+      "state_province_county": "state_province_county",
+      "country": "country",
+      "other_address_details": "other_address_details"
+    },
+    "university_course": {
+      "course_id": "course_id",
+      "course_name": "course_name",
+      "course_description": "course_description",
+      "other_details": "other_details"
+    },
+    "university_department": {
+      "department_id": "department_id",
+      "department_name": "department_name",
+      "department_description": "department_description",
+      "other_details": "other_details"
+    },
+    "university_degree_program": {
+      "degree_program_id": "degree_program_id",
+      "department_id": "department_id",
+      "degree_summary_name": "degree_summary_name",
+      "degree_summary_description": "degree_summary_description",
+      "other_details": "other_details"
+    },
+    "university_section": {
+      "section_id": "section_id",
+      "course_id": "course_id",
+      "section_name": "section_name",
+      "section_description": "section_description",
+      "other_details": "other_details"
+    },
+    "university_semester": {
+      "semester_id": "semester_id",
+      "semester_name": "semester_name",
+      "semester_description": "semester_description",
+      "other_details": "other_details"
+    },
+    "university_student": {
+      "student_id": "student_id",
+      "current_address_id": "current_address_id",
+      "permanent_address_id": "permanent_address_id",
+      "first_name": "first_name",
+      "middle_name": "middle_name",
+      "last_name": "last_name",
+      "cell_mobile_number": "cell_mobile_number",
+      "email_address": "email_address",
+      "ssn": "ssn",
+      "date_first_registered": "date_first_registered",
+      "date_left": "date_left",
+      "other_student_details": "other_student_details"
+    },
+    "university_enrollment": {
+      "student_enrolment_id": "student_enrolment_id",
+      "degree_program_id": "degree_program_id",
+      "semester_id": "semester_id",
+      "student_id": "student_id",
+      "other_details": "other_details"
+    },
+    "university_enrolled_course": {
+      "student_course_id": "student_course_id",
+      "course_id": "course_id",
+      "student_enrolment_id": "student_enrolment_id"
+    },
+    "university_transcript": {
+      "transcript_id": "transcript_id",
+      "transcript_date": "transcript_date",
+      "other_details": "other_details"
+    },
+    "university_transcript_content": {
+      "student_course_id": "student_course_id",
+      "transcript_id": "transcript_id"
+    },
+    "dog_breed": {
+      "breed_code": "breed_code",
+      "breed_name": "breed_name"
+    },
+    "vet_charge": {
+      "charge_id": "charge_id",
+      "charge_type": "charge_type",
+      "charge_amount": "charge_amount"
+    },
+    "dog_size": {
+      "size_code": "size_code",
+      "size_description": "size_description"
+    },
+    "vet_treatment_type": {
+      "treatment_type_code": "treatment_type_code",
+      "treatment_type_description": "treatment_type_description"
+    },
+    "dog_owner": {
+      "owner_id": "owner_id",
+      "first_name": "first_name",
+      "last_name": "last_name",
+      "street": "street",
+      "city": "city",
+      "state": "state",
+      "zip_code": "zip_code",
+      "email_address": "email_address",
+      "home_phone": "home_phone",
+      "cell_number": "cell_number"
+    },
+    "vet_dog": {
+      "dog_id": "dog_id",
+      "owner_id": "owner_id",
+      "abandoned_yn": "abandoned_yn",
+      "breed_code": "breed_code",
+      "size_code": "size_code",
+      "name": "name",
+      "age": "age",
+      "date_of_birth": "date_of_birth",
+      "gender": "gender",
+      "weight": "weight",
+      "date_arrived": "date_arrived",
+      "date_adopted": "date_adopted",
+      "date_departed": "date_departed"
+    },
+    "vet_professional": {
+      "professional_id": "professional_id",
+      "role_code": "role_code",
+      "first_name": "first_name",
+      "street": "street",
+      "city": "city",
+      "state": "state",
+      "zip_code": "zip_code",
+      "last_name": "last_name",
+      "email_address": "email_address",
+      "home_phone": "home_phone",
+      "cell_number": "cell_number"
+    },
+    "vet_treatment": {
+      "treatment_id": "treatment_id",
+      "dog_id": "dog_id",
+      "professional_id": "professional_id",
+      "treatment_type_code": "treatment_type_code",
+      "date_of_treatment": "date_of_treatment",
+      "cost_of_treatment": "cost_of_treatment"
+    },
+    "pet_student": {
+      "student_id": "StuID",
+      "last_name": "LName",
+      "first_name": "Fname",
+      "age": "Age",
+      "sex": "Sex",
+      "major": "Major",
+      "advisor": "Advisor",
+      "city_code": "city_code"
+    },
+    "student_pet_link": {
+      "student_id": "StuID",
+      "pet_id": "PetID"
+    },
+    "student_pet": {
+      "pet_id": "PetID",
+      "pet_type": "PetType",
+      "age": "pet_age",
+      "weight": "weight"
+    },
+    "retail_employee": {
+      "employee_id": "Employee_ID",
+      "name": "Name",
+      "age": "Age",
+      "city": "City"
+    },
+    "retail_shop": {
+      "shop_id": "Shop_ID",
+      "name": "Name",
+      "location": "Location",
+      "district": "District",
+      "number_products": "Number_products",
+      "manager_name": "Manager_name"
+    },
+    "retail_hiring": {
+      "shop_id": "Shop_ID",
+      "employee_id": "Employee_ID",
+      "start_from": "Start_from",
+      "is_full_time": "Is_full_time"
+    },
+    "retail_evaluation": {
+      "employee_id": "Employee_ID",
+      "year_awarded": "Year_awarded",
+      "bonus": "Bonus"
+    },
+    "state_area_code": {
+      "area_code": "area_code",
+      "state": "state"
+    },
+    "voting_contestant": {
+      "contestant_number": "contestant_number",
+      "contestant_name": "contestant_name"
+    },
+    "contestant_vote": {
+      "vote_id": "vote_id",
+      "phone_number": "phone_number",
+      "state": "state",
+      "contestant_number": "contestant_number",
+      "created": "created"
+    },
+    "concert_stadium": {
+      "stadium_id": "Stadium_ID",
+      "location": "Location",
+      "name": "Name",
+      "capacity": "Capacity",
+      "highest_attendance": "Highest",
+      "lowest_attendance": "Lowest",
+      "average_attendance": "Average"
+    },
+    "concert_singer": {
+      "singer_id": "Singer_ID",
+      "name": "Name",
+      "country": "Country",
+      "song_name": "Song_Name",
+      "song_release_year": "Song_release_year",
+      "age": "Age",
+      "is_male": "Is_male"
+    },
+    "music_concert": {
+      "concert_id": "concert_ID",
+      "concert_name": "concert_Name",
+      "theme": "Theme",
+      "stadium_id": "Stadium_ID",
+      "year": "Year"
+    },
+    "concert_singer_link": {
+      "concert_id": "concert_ID",
+      "singer_id": "Singer_ID"
+    },
+    "museum_entity": {
+      "museum_id": "Museum_ID",
+      "name": "Name",
+      "num_of_staff": "Num_of_Staff",
+      "open_year": "Open_Year"
+    },
+    "museum_visitor": {
+      "visitor_id": "ID",
+      "name": "Name",
+      "level_of_membership": "Level_of_membership",
+      "age": "Age"
+    },
+    "museum_visit": {
+      "museum_id": "Museum_ID",
+      "visitor_id": "visitor_ID",
+      "num_of_ticket": "Num_of_Ticket",
+      "total_spent": "Total_spent"
+    }
+  }
+}
