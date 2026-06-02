@@ -1,0 +1,4 @@
+# Database files are too large to commit. The folder is recreated locally
+# (or by users dropping their own .sqlite files into it).
+databases/
+csvs/
