@@ -86,8 +86,10 @@ def main():
                         help="Number of top-k similar history queries to retrieve")
     parser.add_argument("--cluster", action="store_true",
                         help="Use cluster-based filtering of history queries using Stage 1 results")
-    parser.add_argument("--cluster_filter", action="store_true",
-                        help="After Stage 1 + cluster matching, replace Stage 1 predicted tables with the union of tables across matched clusters for downstream stages. Requires --cluster.")
+    parser.add_argument("--cluster_filter", action=argparse.BooleanOptionalAction, default=None,
+                        help="After Stage 1 + cluster matching, replace Stage 1 predicted tables with the union of tables across matched clusters for downstream stages. "
+                             "Defaults to ON whenever --cluster is set; pass --no-cluster_filter to inject clusters without filtering. "
+                             "Has no effect when --cluster is off.")
     parser.add_argument("--stage0_from", type=str, default=None,
                         help="Path to a prior run's folder whose Stage 1 output will be used to pre-prune the schema BEFORE this run's Stage 1. "
                              "Per-question, the prior Stage 1 tables are matched to clusters, and the cluster-union is used to filter the schema passed to this Stage 1. "
@@ -106,8 +108,9 @@ def main():
                         help="Remote vLLM server for Stage 3 (e.g. http://192.168.1.100:8001/v1)")
 
     # Testing
-    parser.add_argument("--test", type=str, default=None,
-                        help="Row slice for testing: '5' for first 5 rows, '10:15' for rows 10-14")
+    parser.add_argument("--rows", type=str, default=None,
+                        help="Row selection: 'N' for the first N rows, or 'START:END' for a python-style "
+                             "half-open slice. Aligned with basesql / din-sql.")
 
     # Reuse previous outputs
     parser.add_argument("--stage1_from", type=str, default="auto",
@@ -119,6 +122,10 @@ def main():
     parser.add_argument("--input_file", type=str, default=None, help="Pre-existing processed JSON (skips preprocessing)")
 
     args = parser.parse_args()
+
+    # --cluster_filter defaults to args.cluster when not explicitly set
+    if args.cluster_filter is None:
+        args.cluster_filter = bool(args.cluster)
 
     # Auto-resolve csv_path / db_path / history_path from --dataset when not explicitly provided.
     # This script is expected to run from .../benchmarks/csc_sql/, so the shared data folders
@@ -231,7 +238,7 @@ def main():
             value_limit_num=args.value_limit_num,
             rename=args.rename,
             view=args.view,
-            test_rows=args.test,
+            test_rows=args.rows,
             history_path=args.history_path,
             history_k=args.history_k,
             cluster=args.cluster,
@@ -325,8 +332,8 @@ def main():
             pipeline_cmd += " --history_view"
 
     # Pass test offset for --test with --stage1_from alignment
-    if args.test and args.stage1_from and ':' in str(args.test):
-        test_offset = int(args.test.split(':')[0])
+    if args.rows and args.stage1_from and ':' in str(args.rows):
+        test_offset = int(args.rows.split(':')[0])
         pipeline_cmd += f" --test_offset {test_offset}"
 
     print(f"Running: {pipeline_cmd}")

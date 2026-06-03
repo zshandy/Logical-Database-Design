@@ -1,0 +1,36 @@
+"""View-name parsing and matching utilities."""
+
+from __future__ import annotations
+
+import re
+from typing import Iterable, List, Sequence
+
+
+def parse_view_base_tables(view_name: str) -> List[str]:
+    """Extract base tables from a view name. Handles three shapes:
+
+      - ``cluster<N>_<t1>_join_<t2>(_join_<tN>)*``
+      - ``workload_updated_cluster<N>_<t1>_join_<t2>(_join_<tN>)*``
+      - bare ``<t1>_join_<t2>(_join_<tN>)*``  (no cluster prefix, e.g. ``bird_org_views_50``)
+
+    An optional trailing ``_view`` (single-table views like ``income_view``) is stripped.
+    """
+    m = re.match(r"^(?:workload_updated_)?cluster\d+_(.+)$", view_name)
+    core = m.group(1) if m else view_name
+    if core.endswith("_view"):
+        core = core[: -len("_view")]
+    return core.split("_join_") if core else []
+
+
+def find_matching_views(
+    views_pool: Sequence[str],
+    retrieved_tables: Iterable[str],
+) -> List[str]:
+    """Return all views from the pool that contain at least one of retrieved_tables."""
+    rt_lower = {str(t).lower() for t in retrieved_tables}
+    out: List[str] = []
+    for v in views_pool:
+        bases = parse_view_base_tables(v)
+        if any(b.lower() in rt_lower for b in bases):
+            out.append(v)
+    return out

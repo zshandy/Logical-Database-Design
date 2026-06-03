@@ -750,45 +750,97 @@ def run_from_csv(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run MAC-SQL with CSV input and single SQLite database")
-    parser.add_argument('--input_csv', type=str, required=True, help='Path to input CSV file')
-    parser.add_argument('--output_file', type=str, required=True, help='Path to output JSONL file')
-    parser.add_argument('--log_file', type=str, default=None, help='Path to log file for prompts')
-    parser.add_argument('--start_pos', type=int, default=0, help='Start position (for resuming)')
-    parser.add_argument('--without_selector', action='store_true', help='Skip schema pruning')
-    parser.add_argument('--question_col', type=str, default='question', help='Column name for questions')
-    parser.add_argument('--sql_col', type=str, default='SQL', help='Column name for ground truth SQL')
-    parser.add_argument('--fresh', action='store_true', help='Start fresh, ignore previous results')
-    parser.add_argument('--history', type=str, default=None,
-                        help="Path to history CSV file with 'question' and 'SQL' columns. If provided, uses embedding-based matching to find similar SQLs and uses _history templates.")
-    parser.add_argument('--cluster', type=str, default=None,
-                        help="Override SQL-column prefix in history CSV. Normally auto-derived from --dataset + --rename "
-                             "(bird/rename='workload_updated_', spider/rename='renamed_', otherwise ''). "
-                             "Only pass this if your history CSV uses a non-standard column name.")
-    parser.add_argument('--rename', type=lambda x: x.lower() == 'true', default=False,
-                        help="True to use renamed views (WORKLOAD_VIEWS). False (default) to use original tables (ORG_TABLES).")
-    parser.add_argument('--view', type=lambda x: x.lower() == 'true', default=False,
-                        help="True to augment cluster mode with view SQL, view paths, and cluster view schemas.")
-    parser.add_argument('--use_history', type=lambda x: x.lower() == 'true', default=True,
-                        help="If False (and --view True), use base prompt templates without top_sqls/paths_str. Default True.")
-    parser.add_argument('--use_cluster', type=lambda x: x.lower() == 'true', default=False,
-                        help="If True, restrict history retrieval to cluster-matched questions and inject paths_str. "
-                             "If False (default), retrieve top_sqls from the full history pool and do not inject paths_str.")
+    parser = argparse.ArgumentParser(
+        description="Run MAC-SQL with CSV input and single SQLite database. "
+                    "CLI is aligned with basesql / din-sql / csc_sql — same flag names, "
+                    "same toggle style (boolean store_true), same path semantics."
+    )
+
+    # --- Core (aligned with basesql) ---
     parser.add_argument('--dataset', type=str, default='bird', choices=['bird', 'spider'],
-                        help="Dataset to run (bird or spider). Selects sqlite path, table/view lists, and linking file.")
-    parser.add_argument('--limit', type=int, default=0,
-                        help="If > 0, only process the first N rows of the input CSV (for quick testing).")
-    parser.add_argument('--cluster_filter', type=lambda x: x.lower() == 'true', default=False,
-                        help="If True (requires --use_cluster true), pre-filter the Selector's input schema to only "
-                             "the tables found in any matched cluster (union of res['tables']). "
-                             "Empty match → fall back to full schema. Output paths auto-substitute '_cluster' → '_clusterfilter'.")
+                        help="Dataset (bird or spider). Selects sqlite path, table/view lists, and linking file.")
+    parser.add_argument('--csv_path', type=str, default=None,
+                        help="Path to input CSV. If omitted, auto-resolves to "
+                             "../../csvs/nl2sql_{dataset}.csv.")
+    parser.add_argument('--db_path', type=str, default=None,
+                        help="Path to SQLite database. If omitted, uses the dataset's built-in "
+                             "constant (BIRD_SQLITE_PATH / spider_constants.SQLITE_PATH).")
+    parser.add_argument('--output_file', type=str, required=True,
+                        help="Path to output JSONL file (required).")
+    parser.add_argument('--log_file', type=str, default=None,
+                        help="Path to prompt log file (optional).")
+    parser.add_argument('--rows', type=str, default=None, metavar='SPEC',
+                        help="Row selection. 'N' for the first N rows, or 'START:END' for a python-style "
+                             "half-open slice (e.g. '100:150' = 50 rows starting at index 100).")
+    parser.add_argument('--question_col', type=str, default='question',
+                        help="Input-CSV column holding the question. Default: 'question'.")
+    parser.add_argument('--sql_col', type=str, default='SQL',
+                        help="Input-CSV column holding the (optional) ground-truth SQL. Default: 'SQL'.")
+    parser.add_argument('--fresh', action='store_true',
+                        help="Ignore previous output and start over. Default: resume from prior --output_file.")
+
+    # --- Selector control (MAC-SQL specific) ---
+    parser.add_argument('--without_selector', action='store_true',
+                        help='Skip schema pruning (Selector agent) — Decomposer sees the full schema.')
+
+    # --- Schema variants (aligned bool flags) ---
+    parser.add_argument('--rename', action='store_true',
+                        help="Use renamed views (WORKLOAD_VIEWS) instead of original tables (ORG_TABLES).")
+    parser.add_argument('--view', action='store_true',
+                        help="Augment with view SQL, view paths, and cluster view schemas.")
     parser.add_argument('--mapping_path', type=str, default=None,
                         help="Path to name-mapping JSON. Only consulted when --rename is set. "
-                             "If omitted, defaults to ../../mapping_files/name_mapping_{dataset}.json "
-                             "(relative to this script). Spider uses core.spider_constants.MAPPING_PATH; "
-                             "bird uses agents.SelectorUnion.MAPPING_PATH — passing this overrides both.")
+                             "If omitted, auto-resolves to ../../mapping_files/name_mapping_{dataset}.json.")
+
+    # --- History (aligned 3-state: --history bool + --history_path) ---
+    parser.add_argument('--history', action='store_true',
+                        help="Enable history mode. When set with no --history_path, defaults to "
+                             "../../csvs/sample_{dataset}.csv. Passing --history_path implicitly enables history.")
+    parser.add_argument('--history_path', type=str, default=None,
+                        help="Path to history CSV. Implies --history when provided.")
+    parser.add_argument('--history_sql_col_prefix', type=str, default=None,
+                        help="Override SQL-column prefix in history CSV. Normally auto-derived from "
+                             "--dataset + --rename (bird/rename='workload_updated_', spider/rename='renamed_', "
+                             "otherwise ''). Only pass when your history CSV uses a non-standard column name.")
+
+    # --- Cluster (aligned with basesql --cluster + --cluster_filter) ---
+    parser.add_argument('--cluster', action='store_true',
+                        help="Restrict history retrieval to cluster-matched questions and inject "
+                             "common-join-paths into the Decomposer's prompt.")
+    parser.add_argument('--cluster_filter', action=argparse.BooleanOptionalAction, default=None,
+                        help="Pre-filter the Selector's input schema to only tables in any matched cluster. "
+                             "Empty match → fall back to full schema. Output paths auto-substitute "
+                             "'_cluster' → '_clusterfilter'. Defaults to ON whenever --cluster is set; "
+                             "pass --no-cluster_filter to inject clusters without filtering. "
+                             "Has no effect when --cluster is off.")
 
     args = parser.parse_args()
+
+    # --- Path auto-resolution (relative to this script's parent-parent = LDD root) ---
+    _this_dir = _os.path.dirname(_os.path.abspath(__file__))
+    _ldd_root = _os.path.abspath(_os.path.join(_this_dir, '..', '..'))
+    if args.csv_path is None:
+        args.csv_path = _os.path.join(_ldd_root, 'csvs', f'nl2sql_{args.dataset}.csv')
+        print(f"[run_union] --csv_path auto-resolved to {args.csv_path}")
+
+    # History gating (matches basesql semantics):
+    #   --history_path FILE  -> implies --history, uses FILE
+    #   --history alone      -> uses default ../../csvs/sample_{dataset}.csv
+    #   neither              -> history disabled
+    if args.history_path:
+        args.history = True
+    elif args.history:
+        args.history_path = _os.path.join(_ldd_root, 'csvs', f'sample_{args.dataset}.csv')
+        if not _os.path.exists(args.history_path):
+            raise SystemExit(
+                f"--history requested but default sample file not found at {args.history_path}. "
+                f"Pass --history_path explicitly or drop --history."
+            )
+        print(f"[run_union] --history_path auto-resolved to {args.history_path}")
+
+    # --cluster_filter defaults to args.cluster when not explicitly set
+    if args.cluster_filter is None:
+        args.cluster_filter = bool(args.cluster)
 
     # --mapping_path: override the module-level mapping constant for the active dataset.
     if args.mapping_path:
@@ -802,18 +854,27 @@ if __name__ == "__main__":
             _sel.MAPPING_PATH = args.mapping_path
         print(f"--mapping_path override: {args.mapping_path}")
 
-    # Validate: cluster_filter requires use_cluster
-    if args.cluster_filter and not args.use_cluster:
-        raise ValueError("--cluster_filter true requires --use_cluster true")
-
-    # Resolve dataset-specific sqlite path, table list, linking file, and cluster prefix
+    # Resolve dataset-specific sqlite path, table list, linking file, and default cluster prefix
     sqlite_path, tables, linking_filename, default_cluster = resolve_dataset_config(args.dataset, args.rename)
-    if args.cluster is None:
-        args.cluster = default_cluster
+    if args.db_path:
+        sqlite_path = args.db_path
+        print(f"--db_path override: {sqlite_path}")
+    if args.history_sql_col_prefix is None:
+        args.history_sql_col_prefix = default_cluster
 
-    # cluster_filter: substitute '_cluster' → '_clusterfilter' in output_file and log_file
-    # so ablation results don't collide with plain --use_cluster runs.
-    # Idempotent: only rewrite if the path doesn't already contain '_clusterfilter'.
+    # Parse --rows SPEC -> (start_pos, limit)
+    _start_pos = 0
+    _limit = 0
+    if args.rows is not None:
+        if ':' in args.rows:
+            _a, _b = args.rows.split(':', 1)
+            _start_pos = int(_a) if _a.strip() else 0
+            _end = int(_b) if _b.strip() else 0
+            _limit = (_end - _start_pos) if _end > 0 else 0
+        else:
+            _limit = int(args.rows)
+
+    # cluster_filter: substitute '_cluster' → '_clusterfilter' in output_file + log_file
     def _cf_rewrite(p):
         if p and '_clusterfilter' not in p and '_cluster' in p:
             return p.replace('_cluster', '_clusterfilter')
@@ -822,8 +883,7 @@ if __name__ == "__main__":
         args.output_file = _cf_rewrite(args.output_file)
         args.log_file = _cf_rewrite(args.log_file)
 
-    # Auto-prefix output_file with outputs/{dataset}/ when the path is relative,
-    # so bird and spider runs never collide at the repo root.
+    # Auto-prefix output_file with outputs/{dataset}/ when the path is relative
     if not os.path.isabs(args.output_file):
         if not args.output_file.replace('\\', '/').startswith(f'outputs/{args.dataset}/'):
             args.output_file = os.path.join('outputs', args.dataset, args.output_file)
@@ -833,26 +893,25 @@ if __name__ == "__main__":
     print(f"  SQLite path: {sqlite_path}")
     print(f"  Tables: {len(tables)} ({'renamed' if args.rename else 'original'})")
     print(f"  Linking file: {linking_filename}")
-    print(f"  Input CSV: {args.input_csv}")
+    print(f"  Input CSV: {args.csv_path}")
     print(f"  Output file: {args.output_file}")
     print(f"  Log file: {args.log_file}")
-    print(f"  Start pos: {args.start_pos}")
+    print(f"  Rows: {args.rows or 'all'}  (start_pos={_start_pos}, limit={_limit})")
     print(f"  Without selector: {args.without_selector}")
     print(f"  Question col: {args.question_col}")
     print(f"  SQL col: {args.sql_col}")
     print(f"  Fresh start: {args.fresh}")
-    print(f"  History CSV: {args.history}")
-    print(f"  Cluster: '{args.cluster}'")
+    print(f"  History CSV: {args.history_path}")
+    print(f"  History SQL col prefix: '{args.history_sql_col_prefix}'")
     print(f"  Rename (use views): {args.rename}")
     print(f"  View mode: {args.view}")
-    print(f"  Use history prompts: {args.use_history}")
-    print(f"  Use cluster filtering: {args.use_cluster}")
+    print(f"  Cluster: {args.cluster}")
     print(f"  Cluster-filter (schema pre-prune): {args.cluster_filter}")
     print()
 
     # Validate paths
-    if not os.path.exists(args.input_csv):
-        raise FileNotFoundError(f"CSV file not found: {args.input_csv}")
+    if not os.path.exists(args.csv_path):
+        raise FileNotFoundError(f"CSV file not found: {args.csv_path}")
     if not os.path.exists(sqlite_path):
         raise FileNotFoundError(f"SQLite file not found: {sqlite_path}")
 
@@ -862,24 +921,24 @@ if __name__ == "__main__":
         os.makedirs(out_dir, exist_ok=True)
 
     run_from_csv(
-        csv_path=args.input_csv,
+        csv_path=args.csv_path,
         sqlite_path=sqlite_path,
         output_file=args.output_file,
         tables=tables,
         log_file=args.log_file,
-        start_pos=args.start_pos,
+        start_pos=_start_pos,
         without_selector=args.without_selector,
         question_col=args.question_col,
         sql_col=args.sql_col,
         fresh=args.fresh,
-        history_csv=args.history,
-        cluster=args.cluster,
+        history_csv=args.history_path,
+        cluster=args.history_sql_col_prefix,
         rename=args.rename,
         view=args.view,
-        use_history=args.use_history,
-        use_cluster=args.use_cluster,
+        use_history=bool(args.history_path),  # injection follows file presence (basesql semantics)
+        use_cluster=args.cluster,
         dataset=args.dataset,
         linking_filename=linking_filename,
-        limit=args.limit,
-        cluster_filter=args.cluster_filter
+        limit=_limit,
+        cluster_filter=args.cluster_filter,
     )
