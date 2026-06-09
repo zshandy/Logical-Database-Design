@@ -2,3 +2,9 @@
 # (or by users dropping their own .sqlite files into it).
 databases/
 csvs/
+benchmarks/cache/
+**/__pycache__/
+benchmarks/_common/__pycache__/
+logs/
+outputs/
+mapping_files/

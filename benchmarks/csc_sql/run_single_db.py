@@ -36,7 +36,9 @@ def main():
     parser.add_argument("--model_sql_merge", type=str, required=True, help="SQL merge/correction model")
 
     # Optional
-    parser.add_argument("--output_dir", type=str, default="outputs")
+    parser.add_argument("--output_dir", type=str, default="outputs",
+                        help="Output root. The default sentinel 'outputs' resolves to "
+                             "<LDD>/outputs/csc_sql/. Pass an explicit path to override.")
     parser.add_argument("--run_time", type=str, default=None)
     parser.add_argument("--visible_devices", type=str, default="0")
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
@@ -85,7 +87,10 @@ def main():
     parser.add_argument("--history_k", type=int, default=3,
                         help="Number of top-k similar history queries to retrieve")
     parser.add_argument("--cluster", action="store_true",
-                        help="Use cluster-based filtering of history queries using Stage 1 results")
+                        help="Use cluster-based filtering of history queries using Stage 1 results. "
+                             "When --mapping_path points at a prep_database config file with a "
+                             "'cluster' section, the precomputed clusters are loaded directly; "
+                             "otherwise clusters are built from history at runtime.")
     parser.add_argument("--cluster_filter", action=argparse.BooleanOptionalAction, default=None,
                         help="After Stage 1 + cluster matching, replace Stage 1 predicted tables with the union of tables across matched clusters for downstream stages. "
                              "Defaults to ON whenever --cluster is set; pass --no-cluster_filter to inject clusters without filtering. "
@@ -99,7 +104,13 @@ def main():
 
     # Quantization
     parser.add_argument("--quantization", type=str, default="bitsandbytes",
-                        help="quantization method: bitsandbytes (INT8), None for bf16")
+                        help="quantization method: bitsandbytes (INT4/INT8 depending on model config + vLLM "
+                             "version — for cycloneboy/* bnb-quantized variants this loads NF4), "
+                             "None for bf16.")
+    parser.add_argument("--max_model_len", type=int, default=None,
+                        help="vLLM max_model_len override. Lower → smaller KV cache reservation → less VRAM "
+                             "(at the cost of shorter context window). When omitted, uses infer.py's default "
+                             "(32768 for inference, 12000 for train DBs).")
 
     # Remote API mode (optional — if not set, runs locally)
     parser.add_argument("--api_base_generate", type=str, default=None,
@@ -126,6 +137,21 @@ def main():
     # --cluster_filter defaults to args.cluster when not explicitly set
     if args.cluster_filter is None:
         args.cluster_filter = bool(args.cluster)
+
+    # Cluster precomputed file: re-use --mapping_path (the consolidated prep config
+    # holds both the rename mapping and the cluster section).
+    if args.cluster and not args.mapping_path:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _ldd_root = os.path.abspath(os.path.join(_here, "..", ".."))
+        _suffix = "_renamed" if args.rename else ""
+        args.mapping_path = os.path.join(
+            _ldd_root, "mapping_files", f"prep_{args.dataset}{_suffix}.json"
+        )
+        if os.path.exists(args.mapping_path):
+            print(f"[csc_sql] --mapping_path auto-resolved to {args.mapping_path}")
+        else:
+            print(f"[csc_sql] --mapping_path auto-resolved to {args.mapping_path} "
+                  f"(not found — will build clusters from history)")
 
     # Auto-resolve csv_path / db_path / history_path from --dataset when not explicitly provided.
     # This script is expected to run from .../benchmarks/csc_sql/, so the shared data folders
@@ -173,6 +199,18 @@ def main():
             _pp._SPIDER_MAPPING_PATH = args.mapping_path
         print(f"[run_single_db] --mapping_path override: {args.mapping_path}")
 
+    # Auto-resolve column names from the mapping JSON's `columns` section so
+    # the user doesn't have to retype --question_col / --sql_col / etc. when
+    # they were already specified at prep_database time. Sets args.sql_col,
+    # args.view_sql_col, args.gt_tables_col on the namespace; explicit CLI
+    # flags still win (handled inside resolve_column_defaults via None-check).
+    import sys as _sys_for_cols
+    _bench_root_for_cols = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    if _bench_root_for_cols not in _sys_for_cols.path:
+        _sys_for_cols.path.insert(0, _bench_root_for_cols)
+    from _common.cli_common import resolve_column_defaults as _rcd
+    _rcd(args, args.mapping_path, pipeline_tag="csc_sql")
+
     # Validate: --cluster_filter requires --cluster
     if args.cluster_filter and not args.cluster:
         raise ValueError("--cluster_filter requires --cluster")
@@ -199,13 +237,24 @@ def main():
     if args.run_time is None:
         args.run_time = RUN_TIME
 
-    # Dataset-scoped output dir: outputs/<dataset>/<timestamp>/
-    dataset_output_dir = os.path.join(args.output_dir, args.dataset)
+    # Dataset-scoped output dir: <LDD>/outputs/csc_sql/<dataset>/<timestamp>/
+    # Honours --output_dir override; otherwise resolves under the LDD outputs tree
+    # so artifacts don't flood the benchmarks folder.
+    if args.output_dir in (None, "", "outputs"):
+        import sys as _sys
+        _bench_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+        if _bench_root not in _sys.path:
+            _sys.path.insert(0, _bench_root)
+        from _common.paths import default_output_dir, default_log_dir
+        dataset_output_dir = default_output_dir("csc_sql", args.dataset)
+    else:
+        dataset_output_dir = os.path.join(args.output_dir, args.dataset)
+        from _common.paths import default_log_dir
     run_dir = os.path.join(dataset_output_dir, args.run_time)
     os.makedirs(run_dir, exist_ok=True)
 
-    # Create log directory: log/<run_time>/
-    log_dir = os.path.join("log", args.run_time)
+    # Log directory: <LDD>/logs/csc_sql/<dataset>/<run_time>/
+    log_dir = default_log_dir("csc_sql", os.path.join(args.dataset, args.run_time))
     os.makedirs(log_dir, exist_ok=True)
     print(f"Logging prompts/responses to: {log_dir}")
 
@@ -242,14 +291,13 @@ def main():
             history_path=args.history_path,
             history_k=args.history_k,
             cluster=args.cluster,
+            cluster_path=args.mapping_path,
             dataset_name=args.dataset,
             stage0_from=args.stage0_from,
+            sql_col_override=getattr(args, 'sql_col', None),
+            view_sql_col_override=getattr(args, 'view_sql_col', None),
+            gt_tables_col_override=getattr(args, 'gt_tables_col', None),
         )
-
-    # Step 2: Run inference pipeline
-    print("=" * 60)
-    print("Step 2: Running inference pipeline")
-    print("=" * 60)
 
     # Default table_link model to sql_generate model if not specified
     model_table_link = args.model_table_link or args.model_sql_generate
@@ -269,6 +317,97 @@ def main():
             print(f"Reusing Stage 1 from: {stage1_file}")
         else:
             print(f"WARNING: --stage1_from='{stage1_from}' but file not found: {stage1_file}, running Stage 1 fresh")
+
+    # Step 1.5: Pre-pass Stage 1 to bootstrap stage0 when cluster_filter is on.
+    # Mirrors MAC-SQL's selector pre-pass pattern:
+    #   pass 1 — Stage 1 sees the full schema → picks candidate tables
+    #   cluster lookup → union(matched cluster tables) = filtered schema
+    #   rebuild prompts with that filtered schema (via existing --stage0_from)
+    #   pass 2 — Stage 1 re-runs on the filtered schema (main pipeline below)
+    # Only fires when --cluster --cluster_filter is on, no prior Stage 1 cache
+    # is being reused, and --stage0_from wasn't passed explicitly.
+    _need_prepass = (
+        args.cluster and args.cluster_filter
+        and link_tables_arg == "none"  # no Stage 1 cache being reused
+        and args.stage0_from is None
+        and not args.skip_preprocess
+    )
+    if _need_prepass:
+        print("=" * 60)
+        print("Step 1.5: Pre-pass Stage 1 (cluster_filter bootstrap)")
+        print("=" * 60)
+        prepass_run_time = f"{args.run_time}_prepass"
+        prepass_run_dir = os.path.join(dataset_output_dir, prepass_run_time)
+        os.makedirs(prepass_run_dir, exist_ok=True)
+        prepass_log_dir = os.path.join(os.path.dirname(log_dir) or ".", prepass_run_time)
+        os.makedirs(prepass_log_dir, exist_ok=True)
+        prepass_cmd = (
+            f"CUDA_VISIBLE_DEVICES={args.visible_devices} "
+            f"python -m cscsql.model.pipeline_infer "
+            f"--model_table_link '{model_table_link}' "
+            f"--model_sql_generate '{args.model_sql_generate}' "
+            f"--model_sql_merge '{args.model_sql_merge}' "
+            f"--source single_db "
+            f"--input_file '{input_file}' "
+            f"--gold_file '{gold_file}' "
+            f"--db_path '{args.db_path}' "
+            f"--run_time {prepass_run_time} "
+            f"--output_dir '{dataset_output_dir}' "
+            f"--visible_devices {args.visible_devices} "
+            f"--tensor_parallel_size {args.tensor_parallel_size} "
+            f"--gpu_memory_utilization {args.gpu_memory_utilization} "
+            f"--seed {args.seed} "
+            f"--eval_step table_link "  # ONLY Stage 1
+            f"--eval_mode {args.eval_mode} "
+            f"--n_table_link {args.n_table_link} "
+            f"--temperature_table_link {args.temperature_table_link} "
+            f"--prompt_name {args.prompt_name} "
+            f"--link_tables 'none' "
+            f"--prompt_mode table "
+            f"--max_few_shot 0 "
+            f"--dataset {args.dataset} "
+            f"--log_dir '{prepass_log_dir}'"
+        )
+        if args.quantization:
+            prepass_cmd += f" --quantization {args.quantization}"
+        if args.max_model_len is not None:
+            prepass_cmd += f" --max_model_len {args.max_model_len}"
+        print(f"Running pre-pass: {prepass_cmd}")
+        os.system(prepass_cmd)
+
+        # Use pre-pass output as stage0_from for the main pipeline.
+        prepass_stage1_file = os.path.join(prepass_run_dir, "sampling_think_table_link.json")
+        if os.path.exists(prepass_stage1_file):
+            args.stage0_from = prepass_run_dir
+            print(f"[pre-pass] Setting --stage0_from to {prepass_run_dir}")
+            # Rebuild prompts so the MAIN Stage 1 sees the cluster-filtered schema.
+            print("[pre-pass] Rebuilding prompts with cluster-filtered schema...")
+            process_csv_to_prompts(
+                csv_path=args.csv_path,
+                db_path=args.db_path,
+                output_path=input_file,
+                bm25_index_path=args.bm25_index_path,
+                value_limit_num=args.value_limit_num,
+                rename=args.rename,
+                view=args.view,
+                test_rows=args.rows,
+                history_path=args.history_path,
+                history_k=args.history_k,
+                cluster=args.cluster,
+                cluster_path=args.mapping_path,
+                dataset_name=args.dataset,
+                stage0_from=args.stage0_from,
+                sql_col_override=getattr(args, 'sql_col', None),
+                view_sql_col_override=getattr(args, 'view_sql_col', None),
+                gt_tables_col_override=getattr(args, 'gt_tables_col', None),
+            )
+        else:
+            print(f"[pre-pass] WARNING: expected {prepass_stage1_file} but not found — falling back to single-pass Stage 1")
+
+    # Step 2: Run inference pipeline
+    print("=" * 60)
+    print("Step 2: Running inference pipeline")
+    print("=" * 60)
 
     # Build pipeline_infer command
     # Note: we use --source single_db and pass --db_path as the .sqlite file
@@ -307,6 +446,8 @@ def main():
     )
     if args.quantization:
         pipeline_cmd += f" --quantization {args.quantization}"
+    if args.max_model_len is not None:
+        pipeline_cmd += f" --max_model_len {args.max_model_len}"
     if args.api_base_generate:
         pipeline_cmd += f" --api_base_generate '{args.api_base_generate}'"
     if args.api_base_merge:
@@ -330,6 +471,12 @@ def main():
             pipeline_cmd += " --history_rename"
         if args.view:
             pipeline_cmd += " --history_view"
+        # Forward column overrides resolved from the mapping JSON's `columns`
+        # section so the inference subprocess reads the right CSV columns.
+        if getattr(args, 'sql_col', None):
+            pipeline_cmd += f" --sql_col '{args.sql_col}'"
+        if getattr(args, 'view_sql_col', None):
+            pipeline_cmd += f" --view_sql_col '{args.view_sql_col}'"
 
     # Pass test offset for --test with --stage1_from alignment
     if args.rows and args.stage1_from and ':' in str(args.rows):
@@ -339,7 +486,7 @@ def main():
     print(f"Running: {pipeline_cmd}")
     os.system(pipeline_cmd)
 
-    # Step 3: Write final SQLs back to the input CSV as "base_cscsql" column
+    # Step 3: Write final SQLs back to the input CSV under unified naming.
     print("=" * 60)
     print("Step 3: Writing results back to CSV")
     print("=" * 60)
@@ -350,53 +497,70 @@ def main():
     # Find the final major voting SQL file from the last stage (sql_merge)
     voting_files = glob.glob(os.path.join(run_dir, "*_sql_merge_pred_major_voting_sqls.sql"))
     if not voting_files:
-        # Fallback: try sql_generate if no merge stage
         voting_files = glob.glob(os.path.join(run_dir, "*_pred_major_voting_sqls.sql"))
 
     if voting_files:
-        # Use the most recent one
         voting_file = sorted(voting_files)[-1]
         print(f"Reading final SQLs from: {voting_file}")
-
         with open(voting_file, "r") as f:
             pred_sqls = [line.strip() for line in f.readlines()]
 
-        df = pd.read_csv(args.csv_path)
-        col_name = "base_cscsql"
-        if args.dataset != "bird":
-            col_name += f"_{args.dataset}"
+        # Unified suffix grammar (matches basesql / din-sql / MAC-SQL):
+        #   _rename / _withview / _clusterfilter or _cluster / _history / _stage0
+        _suffix = ""
         if args.rename:
-            col_name += "_renamed"
+            _suffix += "_rename"
         if args.view:
-            col_name += "_withview"
-        if args.history_path:
-            col_name += "_withhistory"
+            _suffix += "_withview"
         if args.cluster:
-            if args.cluster_filter and args.stage0_from:
-                col_name += "_clusterfiltered_stage0"
-            elif args.cluster_filter:
-                col_name += "_clusterfiltered"
+            if args.cluster_filter:
+                _suffix += "_clusterfilter"
+                if args.stage0_from:
+                    _suffix += "_stage0"
             else:
-                col_name += "_clustered"
-                # If the user reused a pre-filtered Stage 1 cache (path contains "clusterfilter")
-                # but didn't pass --cluster_filter, mark the column so it's distinguishable from
-                # plain --cluster runs that used the regular linking cache.
+                _suffix += "_cluster"
                 if args.stage1_from and "clusterfilter" in str(args.stage1_from).lower():
-                    col_name += "_stage1cf"
+                    _suffix += "_stage1cf"
+        if args.history_path:
+            _suffix += "_history"
+        col_name = f"cscsql{_suffix}"
 
-        # Write to a separate output CSV to avoid corrupting the input
-        output_csv = os.path.join(run_dir, f"results_{col_name}.csv")
-
-        if len(pred_sqls) == len(df):
-            df[col_name] = pred_sqls
-            df.to_csv(output_csv, index=False)
-            print(f"Wrote {len(pred_sqls)} predictions to '{output_csv}' column '{col_name}'")
+        # Row alignment: csc_sql predicts on a sliced range when --rows is set.
+        # Build a DataFrame indexed by the original CSV row indices.
+        df_input = pd.read_csv(args.csv_path)
+        if args.rows is not None:
+            spec = str(args.rows)
+            if ":" in spec:
+                a, b = spec.split(":", 1)
+                start = int(a) if a.strip() else 0
+                end = int(b) if b.strip() else len(df_input)
+            else:
+                start, end = 0, int(spec)
+            expected = end - start
+            if len(pred_sqls) != expected:
+                print(f"WARNING: prediction count {len(pred_sqls)} != expected {expected} for --rows {spec}")
+            idx_range = range(start, start + len(pred_sqls))
         else:
-            print(f"WARNING: mismatch — {len(pred_sqls)} predictions vs {len(df)} rows in CSV")
-            # Save predictions only
-            output_csv = os.path.join(run_dir, f"pred_sqls_{col_name}.csv")
-            pd.DataFrame({col_name: pred_sqls}).to_csv(output_csv, index=False)
-            print(f"Saved predictions separately to: {output_csv}")
+            if len(pred_sqls) != len(df_input):
+                print(f"WARNING: prediction count {len(pred_sqls)} != input rows {len(df_input)}")
+            idx_range = range(len(pred_sqls))
+        df_pred = pd.DataFrame({col_name: pred_sqls}, index=list(idx_range))
+
+        # Bench-root for _common import
+        import sys as _sys_wb
+        _bench_root_wb = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+        if _bench_root_wb not in _sys_wb.path:
+            _sys_wb.path.insert(0, _bench_root_wb)
+        from _common.evaluate import write_back_to_input_csv
+        write_back_to_input_csv(
+            csv_path=args.csv_path,
+            df_predicted=df_pred,
+            column_names=[col_name],
+            final_sql_col=col_name,
+            db_path=args.db_path,
+            gold_sql_col="SQL",
+            pipeline_tag="csc_sql",
+        )
     else:
         print("WARNING: No voting result files found in output directory")
 

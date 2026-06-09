@@ -17,7 +17,9 @@ def retrieve_history_for_questions(history_dir: str, input_questions: List[str],
                                    use_clusters: bool = False,
                                    rename: bool = False, view: bool = False,
                                    dataset: str = "bird",
-                                   cluster_filter: bool = False) -> Dict:
+                                   cluster_filter: bool = False,
+                                   sql_col_override: str = None,
+                                   view_sql_col_override: str = None) -> Dict:
     """
     Retrieve top-k history SQLs per question at inference time.
     Uses precomputed embeddings + optionally clusters + Stage 1 table predictions.
@@ -39,7 +41,11 @@ def retrieve_history_for_questions(history_dir: str, input_questions: List[str],
 
     history_embs = np.load(emb_path)
     history_data = FileUtils.load_json(data_path)
-    sql_cols = get_history_sql_cols(rename, view, dataset=dataset)
+    sql_cols = get_history_sql_cols(
+        rename, view, dataset=dataset,
+        sql_col_override=sql_col_override,
+        view_sql_col_override=view_sql_col_override,
+    )
 
     clusters = None
     if use_clusters:
@@ -464,6 +470,8 @@ if __name__ == '__main__':
     parser.add_argument("--system_prompt", type=str, default="default", help="system_prompt")
     parser.add_argument("--log_dir", type=str, default=None, help="directory to log prompts and responses per question")
     parser.add_argument("--quantization", type=str, default=None, help="quantization method (e.g. bitsandbytes)")
+    parser.add_argument("--max_model_len", type=int, default=None,
+                        help="vLLM max_model_len override. Lower → less KV cache → less VRAM.")
     parser.add_argument("--api_base", type=str, default=None, help="remote vLLM server URL (e.g. http://192.168.1.100:8000/v1). If set, uses remote mode.")
     parser.add_argument("--api_model", type=str, default=None, help="model name on the remote server (for API calls)")
     parser.add_argument("--view_ddls_file", type=str, default=None, help="path to view DDLs JSON file for view injection")
@@ -472,6 +480,13 @@ if __name__ == '__main__':
     parser.add_argument("--use_clusters", action="store_true", help="use cluster-based history filtering")
     parser.add_argument("--history_rename", action="store_true", help="history uses renamed SQL columns")
     parser.add_argument("--history_view", action="store_true", help="history includes view SQL columns")
+    parser.add_argument("--sql_col", type=str, default=None,
+                        help="Override the rewritten-SQL column name in the precomputed history. "
+                             "Default: derived from --history_rename / --history_view; "
+                             "auto-resolved by run_single_db.py from the mapping JSON's columns.sql.")
+    parser.add_argument("--view_sql_col", type=str, default=None,
+                        help="Override the view-rewritten-SQL column name. Auto-resolved from "
+                             "the mapping JSON's columns.view_sql.")
     parser.add_argument("--dataset", type=str, default="bird", choices=["bird", "spider"], help="dataset name (affects table/view/SQL column lookups)")
     parser.add_argument("--test_offset", type=int, default=0, help="offset into link_table_results when using --test with --stage1_from")
     parser.add_argument("--cluster_filter", action="store_true",
@@ -482,9 +497,13 @@ if __name__ == '__main__':
     shuffle_ab = False if opt.shuffle_ab in ['0', 0] else True
     is_train = True if str(opt.db_path).find("train") > -1 else False
 
-    max_model_len = 32768
-    if is_train:
-        max_model_len = 12000
+    # max_model_len precedence: CLI flag > train-vs-inference default.
+    if getattr(opt, 'max_model_len', None) is not None:
+        max_model_len = int(opt.max_model_len)
+    else:
+        max_model_len = 32768
+        if is_train:
+            max_model_len = 12000
     max_output_len = 1024  # (max_input_len + max_output_len) must <= max_model_len
 
     db_full_schema_config, db_sample_config = CommonUtils.get_all_db_full_schema_and_sample(db_root=opt.db_path)
@@ -562,6 +581,8 @@ if __name__ == '__main__':
             view=opt.history_view,
             dataset=opt.dataset,
             cluster_filter=opt.cluster_filter,
+            sql_col_override=getattr(opt, 'sql_col', None),
+            view_sql_col_override=getattr(opt, 'view_sql_col', None),
         )
 
     # Validate: cluster_filter requires use_clusters

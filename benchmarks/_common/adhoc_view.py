@@ -24,7 +24,6 @@ def find_fk_conditions_for_view_adhoc(
     rename_mode: bool = False,
     mapping_path: Optional[str] = None,
     ds_org_tables: Optional[Sequence[str]] = None,
-    org_keyed: bool = False,
 ) -> List[str]:
     """Return ``T1.col=T2.col`` FK condition strings between pairs of ``tables``.
 
@@ -38,7 +37,7 @@ def find_fk_conditions_for_view_adhoc(
     if not ds_org_tables or not mapping_path:
         return []
     tset = {t.lower() for t in tables}
-    table_to_view, view_org_to_renamed = load_rename_mapping(mapping_path, org_keyed)
+    table_to_view, view_org_to_renamed = load_rename_mapping(mapping_path)
     out = set()
     for from_t, from_c, ref_t, ref_c in fetch_org_fks(db_path, ds_org_tables):
         from_view = table_to_view.get(from_t.lower())

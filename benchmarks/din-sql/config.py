@@ -21,6 +21,7 @@ from _common import datasets as _ds  # noqa: E402
 from _common.cli_common import (  # noqa: E402
     add_common_args,
     default_cluster_filter,
+    resolve_column_defaults,
     resolve_mapping_path,
     resolve_paths,
 )
@@ -136,6 +137,7 @@ __all__ = [
     "apply_sample_auto_mapping",
     "resolve_paths",
     "resolve_mapping_path",
+    "resolve_column_defaults",
     "resolve_rename_v_suffix",
     "resolve_view_v_suffix",
     "lookup_module_list",

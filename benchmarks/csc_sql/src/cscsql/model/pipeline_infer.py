@@ -57,6 +57,9 @@ def run_eval_by_cmd(opt, eval_mode="greedy_search", eval_step=None):
     quant_arg = ""
     if hasattr(opt, 'quantization') and opt.quantization:
         quant_arg = f"--quantization {opt.quantization}"
+    max_model_len_arg = ""
+    if hasattr(opt, 'max_model_len') and opt.max_model_len is not None:
+        max_model_len_arg = f"--max_model_len {opt.max_model_len}"
 
     # Remote API: pick the right server per stage
     api_arg = ""
@@ -84,6 +87,10 @@ def run_eval_by_cmd(opt, eval_mode="greedy_search", eval_step=None):
             history_arg += " --history_rename"
         if getattr(opt, 'history_view', False):
             history_arg += " --history_view"
+        if getattr(opt, 'sql_col', None):
+            history_arg += f" --sql_col '{opt.sql_col}'"
+        if getattr(opt, 'view_sql_col', None):
+            history_arg += f" --view_sql_col '{opt.view_sql_col}'"
 
     greedy_search_cmd = f"CUDA_VISIBLE_DEVICES={opt.visible_devices} python3 -m cscsql.model.infer  \
         --pretrained_model_name_or_path '{pretrained_model_name_or_path}' \
@@ -105,6 +112,7 @@ def run_eval_by_cmd(opt, eval_mode="greedy_search", eval_step=None):
         --dataset {getattr(opt, 'dataset', 'bird')} \
         {log_dir_arg} \
         {quant_arg} \
+        {max_model_len_arg} \
         {api_arg} \
         {view_arg} \
         {history_arg} \
@@ -182,6 +190,8 @@ if __name__ == "__main__":
     parser.add_argument("--prompt_mode", type=str, default="merge", help="prompt_mode")
     parser.add_argument("--log_dir", type=str, default=None, help="directory to log prompts and responses")
     parser.add_argument("--quantization", type=str, default=None, help="quantization method (e.g. bitsandbytes)")
+    parser.add_argument("--max_model_len", type=int, default=None,
+                        help="vLLM max_model_len override (forwarded to infer.py).")
     parser.add_argument("--api_base_generate", type=str, default=None,
                         help="remote vLLM server URL for Stage 1+2 (e.g. http://192.168.1.100:8000/v1)")
     parser.add_argument("--api_base_merge", type=str, default=None,
@@ -196,6 +206,10 @@ if __name__ == "__main__":
                         help="replace Stage 1 tables with the union of tables in matched clusters (requires --use_clusters)")
     parser.add_argument("--history_rename", action="store_true", help="history uses renamed SQL columns")
     parser.add_argument("--history_view", action="store_true", help="history includes view SQL columns")
+    parser.add_argument("--sql_col", type=str, default=None,
+                        help="Override SQL column name in history (forwarded to infer.py).")
+    parser.add_argument("--view_sql_col", type=str, default=None,
+                        help="Override view-SQL column name in history (forwarded to infer.py).")
     parser.add_argument("--dataset", type=str, default="bird", choices=["bird", "spider"], help="dataset name")
     parser.add_argument("--test_offset", type=int, default=0, help="offset into link_table_results for --test")
 

@@ -29,6 +29,30 @@ LDD_ROOT: str = os.path.abspath(
 CSV_DIR: str = os.path.join(LDD_ROOT, "csvs")
 DB_DIR: str = os.path.join(LDD_ROOT, "databases")
 MAPPING_DIR: str = os.path.join(LDD_ROOT, "mapping_files")
+LOG_DIR: str = os.path.join(LDD_ROOT, "logs")
+OUTPUT_DIR: str = os.path.join(LDD_ROOT, "outputs")
+
+
+def default_log_dir(benchmark: str, subdir: str = "") -> str:
+    """Per-benchmark log directory: ``<LDD>/logs/<benchmark>[/<subdir>]``.
+
+    ``benchmark`` is the baseline name (e.g. ``basesql``, ``din-sql``,
+    ``csc_sql``, ``MAC-SQL``, ``prep_database``). ``subdir`` is whatever the
+    caller wants to organize under (e.g. ``"bird/run_20260605-164333_rename"``).
+    The directory is NOT created here — the caller decides when to mkdir.
+    """
+    base = os.path.join(LOG_DIR, benchmark)
+    return os.path.join(base, subdir) if subdir else base
+
+
+def default_output_dir(benchmark: str, subdir: str = "") -> str:
+    """Per-benchmark output directory: ``<LDD>/outputs/<benchmark>[/<subdir>]``.
+
+    Same contract as :func:`default_log_dir` but for output artifacts (final
+    CSVs, JSONLs, predictions). Keeps results out of the benchmarks tree.
+    """
+    base = os.path.join(OUTPUT_DIR, benchmark)
+    return os.path.join(base, subdir) if subdir else base
 
 
 def default_csv_path(dataset: str, sample: int = 100) -> str:
@@ -50,11 +74,22 @@ def default_history_path(dataset: str, sample: int = 100) -> str:
     return os.path.join(CSV_DIR, f"sample_{dataset}.csv")
 
 
-def default_mapping_path(dataset: str, sample: int = 100) -> str:
-    """Default name-mapping JSON: ``mapping_files/name_mapping_{dataset}.json``."""
+def default_mapping_path(dataset: str, sample: int = 100, rename: bool = True) -> str:
+    """Default consolidated prep-config JSON: ``mapping_files/prep_{dataset}[_renamed].json``.
+
+    The file produced by ``prep_database`` is a single consolidated config that
+    contains the rename mapping, cluster artifacts, and views list as nested
+    sections. The loaders (``load_rename_mapping``, ``load_clusters_from_file``)
+    accept both this consolidated shape and the older flat files
+    (``name_mapping_*.json``, ``cluster_*.json``) for backward compatibility.
+
+    The ``_renamed`` suffix mirrors prep_database's convention when ``--rename``
+    was used at build time.
+    """
+    suffix = "_renamed" if rename else ""
     if sample is not None and sample < 100:
-        return os.path.join(MAPPING_DIR, f"name_mapping_{dataset}_{sample}.json")
-    return os.path.join(MAPPING_DIR, f"name_mapping_{dataset}.json")
+        return os.path.join(MAPPING_DIR, f"prep_{dataset}_{sample}{suffix}.json")
+    return os.path.join(MAPPING_DIR, f"prep_{dataset}{suffix}.json")
 
 
 def resolve_path(value: Optional[str], default: str) -> str:

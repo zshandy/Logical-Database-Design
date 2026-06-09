@@ -1,0 +1,50 @@
+# Consolidated requirements for all 4 NL2SQL baselines:
+#   basesql, din-sql, csc_sql, MAC-SQL  (+ prep_database.py and _common/)
+#
+# Versions pinned to the conda env "openai-py39" where each package is installed
+# there; unpinned otherwise. Install with:
+#   pip install -r benchmarks/requirements.txt
+
+# ---- Core: used by _common (all 4 baselines + prep_database) ----
+openai==2.15.0
+google-genai==1.47.0
+langchain==0.3.27
+langchain-openai==0.3.35
+sqlglot==30.8.0
+pandas==2.2.3
+numpy==2.0.2
+scikit-learn==1.6.1
+nltk==3.9.1
+tqdm==4.67.1
+requests==2.32.5
+tiktoken==0.12.0
+func_timeout==4.3.5
+
+# ---- csc_sql (inference pipeline + dataset processing) ----
+ijson
+jsonlines
+faiss-cpu==1.12.0
+huggingface_hub==0.34.3
+transformers==4.55.0
+torch==2.8.0+cu126
+sentence-transformers==5.0.0
+pyserini==0.22.1
+
+# ---- MAC-SQL ----
+sqlparse
+
+# ---- Optional: only needed for the MAC-SQL flask demo apps ----
+# flask
+
+# ---- Optional: csc_sql GRPO training + MAC-SQL fine-tune ----
+# trl
+# accelerate
+# deepspeed
+# datasets
+# vllm
+# modelscope
+# sentencepiece
+# h5py
+# rouge_score
+# fire
+# Pillow

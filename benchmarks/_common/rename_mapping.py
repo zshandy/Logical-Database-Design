@@ -9,29 +9,95 @@ from typing import Dict, List, Sequence, Tuple
 
 def load_rename_mapping(
     mapping_path: str,
-    org_keyed_columns: bool = False,
 ) -> Tuple[Dict[str, str], Dict[str, Dict[str, str]]]:
-    """Load a name-mapping JSON.
+    """Load a name-mapping JSON in **bird-style** (org-keyed) format.
 
     Returns ``(table_to_view, view_org_to_renamed)`` where:
       - ``table_to_view``: ``{org_table_lower: renamed_view}`` (case-insensitive keys)
       - ``view_org_to_renamed``: ``{renamed_view: {org_col_lower: renamed_col}}``
 
-    ``org_keyed_columns`` controls how the inner column dict is interpreted:
-      - ``False`` (spider): inner dict is ``{renamed_col: org_col}``
-      - ``True``  (bird):   inner dict is ``{org_col: renamed_col}``
+    Supports two on-disk shapes:
+
+    1. **Consolidated** (current ``prep_database`` output):
+       ``{"rename": {"table_to_view": ..., "column_mapping": ...}, ...}``
+    2. **Legacy** flat format:
+       ``{"table_to_view": ..., "column_mapping": ...}``
+
+    The inner column dict is always bird-style:
+    ``column_mapping[view] = {original_col: renamed_col}``.
+    Legacy spider files in the *opposite* direction were migrated via
+    ``benchmarks/flip_spider_mapping.py``.
     """
     with open(mapping_path, encoding="utf-8") as f:
-        m = json.load(f)
+        data = json.load(f)
+    # Shape sniffer
+    if isinstance(data.get("rename"), dict) and "table_to_view" in data["rename"]:
+        m = data["rename"]
+    elif "table_to_view" in data:
+        m = data
+    else:
+        raise KeyError(
+            f"mapping file {mapping_path} has neither "
+            f"'rename.table_to_view' (consolidated) nor 'table_to_view' (legacy)."
+        )
     table_to_view = {k.lower(): v for k, v in m["table_to_view"].items()}
     column_mapping = m["column_mapping"]
     view_org_to_renamed: Dict[str, Dict[str, str]] = {}
     for view, cols in column_mapping.items():
-        if org_keyed_columns:
-            view_org_to_renamed[view] = {k.lower(): v for k, v in cols.items()}
-        else:
-            view_org_to_renamed[view] = {v.lower(): k for k, v in cols.items()}
+        view_org_to_renamed[view] = {k.lower(): v for k, v in cols.items()}
     return table_to_view, view_org_to_renamed
+
+
+def load_active_views(mapping_path: str) -> Tuple[List[str], List[str]]:
+    """Return ``(active_tables, cluster_views)`` lists from a prep-config JSON.
+
+    ``active_tables`` is the list of table/view names the downstream pipeline
+    should expose to the LLM. Sources, in priority order:
+      1. top-level ``tables`` (current prep_database output; renamed views in
+         ``--rename`` mode, base tables otherwise).
+      2. ``rename.table_to_view.values()`` (consolidated rename section).
+      3. ``table_to_view.values()`` (legacy flat ``name_mapping_*.json``).
+
+    ``cluster_views`` comes from ``view.cluster_views`` (current) or is empty
+    when the file pre-dates the view phase. Pipelines use these as the source
+    of truth so stale leftover views in the DB are ignored.
+    """
+    with open(mapping_path, encoding="utf-8") as f:
+        data = json.load(f)
+    active_tables: List[str] = []
+    if isinstance(data.get("tables"), list) and data["tables"]:
+        active_tables = sorted({str(t) for t in data["tables"]})
+    elif isinstance(data.get("rename"), dict) and "table_to_view" in data["rename"]:
+        active_tables = sorted({str(v) for v in data["rename"]["table_to_view"].values()})
+    elif "table_to_view" in data:
+        active_tables = sorted({str(v) for v in data["table_to_view"].values()})
+    cluster_views: List[str] = []
+    if isinstance(data.get("view"), dict) and "cluster_views" in data["view"]:
+        seen = set()
+        for v in data["view"]["cluster_views"]:
+            sv = str(v)
+            if sv not in seen:
+                seen.add(sv)
+                cluster_views.append(sv)
+    return active_tables, cluster_views
+
+
+def load_active_columns(mapping_path: str) -> dict:
+    """Return the history-CSV column-name defaults recorded by the prep run.
+
+    Returns a dict with any subset of: ``question``, ``sql``, ``gt_tables``,
+    ``view_sql``. Pipelines should treat these as the default columns to read
+    when the user did not pass an explicit ``--*_col`` flag.
+
+    Returns an empty dict if the JSON has no ``columns`` section (legacy
+    files), so callers can do ``cols.get("sql", "SQL")`` etc.
+    """
+    with open(mapping_path, encoding="utf-8") as f:
+        data = json.load(f)
+    raw = data.get("columns")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): str(v) for k, v in raw.items() if v is not None}
 
 
 def fetch_org_fks(
@@ -75,16 +141,13 @@ def build_renamed_fk_block(
     db_path: str,
     org_tables: Sequence[str],
     mapping_path: str,
-    org_keyed_columns: bool = False,
 ) -> str:
     """Translate each FK declared between ``org_tables`` into the renamed namespace
     and return a ``Foreign Keys:`` block string.
 
     Returns ``""`` if no FKs translate cleanly.
     """
-    table_to_view, view_org_to_renamed = load_rename_mapping(
-        mapping_path, org_keyed_columns
-    )
+    table_to_view, view_org_to_renamed = load_rename_mapping(mapping_path)
     fks = fetch_org_fks(db_path, org_tables)
 
     lines: List[str] = []

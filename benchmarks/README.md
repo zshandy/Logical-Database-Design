@@ -164,184 +164,6 @@ filter's contribution.
 
 ---
 
-## Pipeline-specific flags
-
-### basesql
-
-No basesql-only flags — the common set above is complete. Stage prompts live
-in [basesql/prompts.py](basesql/prompts.py); the per-question driver is in
-[basesql/pipeline.py](basesql/pipeline.py).
-
-### din-sql
-
-Same flag set as basesql. Stages 2–4 swap in DIN-SQL-style classification +
-nested/non-nested branching + self-correction; templates live in
-[din-sql/prompts.py](din-sql/prompts.py) (16 templates spanning the 4 stages).
-
-### csc_sql
-
-CSC-SQL accepts the **common flags** (`--dataset`, `--csv_path`, `--db_path`,
-`--rows`, `--question_col`, `--sql_col`, `--rename`, `--mapping_path`,
-`--view`, `--history`, `--history_path`, `--cluster`, `--cluster_filter`)
-with the same semantics as basesql. The additional flags below are
-CSC-SQL-specific and exist because it has a sampling-and-merge architecture
-running on a local (or remote) vLLM server.
-
-**Models (required)** — CSC-SQL has 3 separately-configurable LLM stages:
-
-| Flag | Purpose |
-|------|---------|
-| `--model_table_link` | Model name for stage 1 (table linking). |
-| `--model_sql_generate` | Model name for stage 2 (SQL generation). |
-| `--model_sql_merge` | Model name for stage 3 (merge / correction). |
-
-**Sampling** — CSC-SQL draws multiple LLM samples per stage and votes:
-
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--n_table_link` | 4 | Sampling count for stage 1. |
-| `--n_sql_generate` | 8 | Sampling count for stage 2. |
-| `--n_sql_merge` | 4 | Sampling count for stage 3. |
-| `--temperature_table_link` | 0.8 | Stage 1 sampling temperature. |
-| `--temperature_sql_generate` | 0.8 | Stage 2 sampling temperature. |
-| `--temperature_sql_merge` | 0.8 | Stage 3 sampling temperature. |
-| `--history_k` | 3 | Top-K history queries to retrieve (basesql/din-sql/MAC-SQL hardcode 3). |
-| `--prompt_name` | `think` | Prompt variant. |
-| `--bm25_index_path` | auto | BM25 column-value index. |
-| `--value_limit_num` | 2 | Sampled values per column. |
-| `--seed` | 42 | Random seed. |
-
-**vLLM inference server** — for local GPU inference:
-
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--visible_devices` | `0` | `CUDA_VISIBLE_DEVICES`. |
-| `--tensor_parallel_size` | 1 | vLLM TP size. |
-| `--gpu_memory_utilization` | 0.90 | vLLM GPU memory fraction. |
-| `--quantization` | `bitsandbytes` | `bitsandbytes` (INT8) or `None` (bf16). |
-| `--api_base_generate` | none | Remote vLLM server URL for stages 1+2 (skips local startup). |
-| `--api_base_merge` | none | Remote vLLM server URL for stage 3. |
-
-**Reuse / resume**:
-
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--stage1_from` | `auto` | Reuse a prior run's stage-1 outputs. `auto`, `fresh`, or a path. |
-| `--stage0_from` | none | Use a prior run's stage 1 as a stage-0 schema pre-prune. Requires `--cluster_filter`, `--cluster`, `--history_path`. |
-| `--skip_preprocess` | off | Skip preprocessing; use existing `--input_file`. |
-| `--input_file` | none | Pre-existing processed JSON (skips preprocessing). |
-
-**Eval & output**:
-
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--run_eval` | off | Run gold-SQL execution for EX accuracy. Predicted SQLs are still produced regardless. |
-| `--eval_step` | `pipeline` | Which step to run/eval. |
-| `--eval_mode` | `major_voting` | How to aggregate samples into a single SQL. |
-| `--output_dir` | `outputs` | Where to write results. |
-| `--run_time` | auto | Run-id suffix; defaults to current timestamp. |
-
-### MAC-SQL
-
-MAC-SQL is the original multi-agent design (Selector → Decomposer →
-Refiner) with our schema-restriction additions bolted on. It accepts the
-**common flags** with the same names and semantics as basesql:
-`--dataset`, `--csv_path`, `--db_path`, `--rows`, `--question_col`,
-`--sql_col`, `--rename`, `--mapping_path`, `--view`, `--history`,
-`--history_path`, `--cluster`, `--cluster_filter`.
-
-The flags below are MAC-SQL-specific:
-
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--output_file` | required | Path to output JSONL file (MAC-SQL writes JSONL, not CSV). |
-| `--log_file` | none | Path to prompt log file. |
-| `--fresh` | off | Ignore previous output and start over. Default: resume from prior `--output_file`. |
-| `--without_selector` | off | Skip the Selector agent entirely — Decomposer sees the full schema. (Conceptually distinct from `--use_linking` in basesql/din-sql.) |
-| `--history_sql_col_prefix` | auto | Override the SQL-column prefix in the history CSV (auto-derived from `--dataset` + `--rename`: `workload_updated_` / `renamed_` / `''`). Rarely needed. |
-
----
-
-## Auto-resolution defaults
-
-When you don't pass `--csv_path`, `--db_path`, `--history_path`, or
-`--mapping_path`, each pipeline resolves them relative to the LDD root
-(two directories above the pipeline script):
-
-| Flag | Default path |
-|------|--------------|
-| `--csv_path` | `../../csvs/nl2sql_{dataset}.csv` |
-| `--db_path` | `../../databases/merged_{dataset}.sqlite` |
-| `--history_path` | `../../csvs/sample_{dataset}.csv` (only when `--history` is set) |
-| `--mapping_path` | `../../mapping_files/name_mapping_{dataset}.json` (only when `--rename` is set) |
-
-When `--sample N` is passed with `N<100` and `--dataset` is `bird` or `spider`,
-the following are auto-mapped to their `_N` variants (unless explicitly
-overridden):
-
-| Flag | Auto-mapped to |
-|------|----------------|
-| `--csv_path` | `../../csvs/nl2sql_{dataset}_{N}.csv` (if file exists) |
-| `--history_path` | `../../csvs/sample_{dataset}_{N}.csv` |
-| `--mapping_path` | `../../mapping_files/name_mapping_{dataset}_{N}.json` |
-| `--rename_v` | `{dataset}_renamed_tables_{N}` (when `--rename` is set) |
-| `--view_v` | `{dataset}_renamed_views_{N}` (with `--rename`) or `{dataset}_org_views_{N}` |
-
-The supported `--sample` values are determined by which variants are present
-in [`_common/datasets.py`](_common/datasets.py) — currently `0` and `50` for
-both spider and bird.
-
----
-
-## What can be used
-
-### Datasets
-
-`spider` and `bird` are wired end-to-end. Each has:
-
-- An `org_tables` list (the source schema)
-- A `renamed_tables` list (used with `--rename`)
-- An `org_views` and `renamed_views` pool (used with `--view`)
-- `_50` and `_0` sampled variants (used with `--sample 50` / `--sample 0`)
-- A `db_dict` mapping `db_id → tables` for `--per_db` mode
-
-All defined in [`_common/datasets.py`](_common/datasets.py). To add a new
-dataset, append to `DATASET_TABLES` there.
-
-### Models
-
-Anything OpenAI accepts as a `chat.completions.create(model=...)` value, plus
-Google GenAI models when the name starts with `gemini`. Defaults:
-
-- basesql / din-sql / MAC-SQL: `gpt-4.1-mini`
-- csc_sql: pass `--model_table_link` / `--model_sql_generate` /
-  `--model_sql_merge` (typically a vLLM-hosted Qwen2.5-Coder checkpoint)
-
-The pipeline ID suffixes appended to log dirs encode the model digits — e.g.
-`gpt-4.1-mini` → `_gpt41`, `gemini-2.5-flash-lite` → `_gem25`,
-`gpt-5.4-mini` → `_gpt54`.
-
-### Rename variants
-
-| Variable name pattern | Where defined | Used when |
-|----------------------|---------------|-----------|
-| `{dataset}_org_tables` | datasets.py | default (no `--rename`) |
-| `{dataset}_renamed_tables` | datasets.py | `--rename` |
-| `{dataset}_renamed_tables_{N}` | datasets.py | `--rename --sample N` |
-| `{dataset}_org_views` | datasets.py | `--view` (no rename) |
-| `{dataset}_org_views_{N}` | datasets.py | `--view --sample N` (no rename) |
-| `{dataset}_renamed_views` | datasets.py | `--view --rename` |
-| `{dataset}_renamed_views_{N}` | datasets.py | `--view --rename --sample N` |
-
-You can override either tables or views explicitly:
-
-```bash
-python basesql.py --dataset bird --rename --rename_v bird_renamed_tables_0
-python basesql.py --dataset bird --view   --view_v   bird_org_views_50
-```
-
----
-
 ## Examples
 
 ### Quick spider run, no schema augmentation
@@ -456,6 +278,184 @@ The augmented output CSV adds these columns to the input (basesql/din-sql):
 
 DIN-SQL adds parallel `dinsql_*` columns plus `dinsql_label{suffix}` and
 `dinsql_sub_questions{suffix}` from the stage-2 classifier.
+
+---
+
+## Auto-resolution defaults
+
+When you don't pass `--csv_path`, `--db_path`, `--history_path`, or
+`--mapping_path`, each pipeline resolves them relative to the LDD root
+(two directories above the pipeline script):
+
+| Flag | Default path |
+|------|--------------|
+| `--csv_path` | `../../csvs/nl2sql_{dataset}.csv` |
+| `--db_path` | `../../databases/merged_{dataset}.sqlite` |
+| `--history_path` | `../../csvs/sample_{dataset}.csv` (only when `--history` is set) |
+| `--mapping_path` | `../../mapping_files/name_mapping_{dataset}.json` (only when `--rename` is set) |
+
+When `--sample N` is passed with `N<100` and `--dataset` is `bird` or `spider`,
+the following are auto-mapped to their `_N` variants (unless explicitly
+overridden):
+
+| Flag | Auto-mapped to |
+|------|----------------|
+| `--csv_path` | `../../csvs/nl2sql_{dataset}_{N}.csv` (if file exists) |
+| `--history_path` | `../../csvs/sample_{dataset}_{N}.csv` |
+| `--mapping_path` | `../../mapping_files/name_mapping_{dataset}_{N}.json` |
+| `--rename_v` | `{dataset}_renamed_tables_{N}` (when `--rename` is set) |
+| `--view_v` | `{dataset}_renamed_views_{N}` (with `--rename`) or `{dataset}_org_views_{N}` |
+
+The supported `--sample` values are determined by which variants are present
+in [`_common/datasets.py`](_common/datasets.py) — currently `0` and `50` for
+both spider and bird.
+
+---
+
+## What can be used
+
+### Datasets
+
+`spider` and `bird` are wired end-to-end. Each has:
+
+- An `org_tables` list (the source schema)
+- A `renamed_tables` list (used with `--rename`)
+- An `org_views` and `renamed_views` pool (used with `--view`)
+- `_50` and `_0` sampled variants (used with `--sample 50` / `--sample 0`)
+- A `db_dict` mapping `db_id → tables` for `--per_db` mode
+
+All defined in [`_common/datasets.py`](_common/datasets.py). To add a new
+dataset, append to `DATASET_TABLES` there.
+
+### Models
+
+Anything OpenAI accepts as a `chat.completions.create(model=...)` value, plus
+Google GenAI models when the name starts with `gemini`. Defaults:
+
+- basesql / din-sql / MAC-SQL: `gpt-4.1-mini`
+- csc_sql: pass `--model_table_link` / `--model_sql_generate` /
+  `--model_sql_merge` (typically a vLLM-hosted Qwen2.5-Coder checkpoint)
+
+The pipeline ID suffixes appended to log dirs encode the model digits — e.g.
+`gpt-4.1-mini` → `_gpt41`, `gemini-2.5-flash-lite` → `_gem25`,
+`gpt-5.4-mini` → `_gpt54`.
+
+### Rename variants
+
+| Variable name pattern | Where defined | Used when |
+|----------------------|---------------|-----------|
+| `{dataset}_org_tables` | datasets.py | default (no `--rename`) |
+| `{dataset}_renamed_tables` | datasets.py | `--rename` |
+| `{dataset}_renamed_tables_{N}` | datasets.py | `--rename --sample N` |
+| `{dataset}_org_views` | datasets.py | `--view` (no rename) |
+| `{dataset}_org_views_{N}` | datasets.py | `--view --sample N` (no rename) |
+| `{dataset}_renamed_views` | datasets.py | `--view --rename` |
+| `{dataset}_renamed_views_{N}` | datasets.py | `--view --rename --sample N` |
+
+You can override either tables or views explicitly:
+
+```bash
+python basesql.py --dataset bird --rename --rename_v bird_renamed_tables_0
+python basesql.py --dataset bird --view   --view_v   bird_org_views_50
+```
+
+---
+
+## Pipeline-specific flags
+
+### basesql
+
+No basesql-only flags — the common set above is complete. Stage prompts live
+in [basesql/prompts.py](basesql/prompts.py); the per-question driver is in
+[basesql/pipeline.py](basesql/pipeline.py).
+
+### din-sql
+
+Same flag set as basesql. Stages 2–4 swap in DIN-SQL-style classification +
+nested/non-nested branching + self-correction; templates live in
+[din-sql/prompts.py](din-sql/prompts.py) (16 templates spanning the 4 stages).
+
+### csc_sql
+
+CSC-SQL accepts the **common flags** (`--dataset`, `--csv_path`, `--db_path`,
+`--rows`, `--question_col`, `--sql_col`, `--rename`, `--mapping_path`,
+`--view`, `--history`, `--history_path`, `--cluster`, `--cluster_filter`)
+with the same semantics as basesql. The additional flags below are
+CSC-SQL-specific and exist because it has a sampling-and-merge architecture
+running on a local (or remote) vLLM server.
+
+**Models (required)** — CSC-SQL has 3 separately-configurable LLM stages:
+
+| Flag | Purpose |
+|------|---------|
+| `--model_table_link` | Model name for stage 1 (table linking). |
+| `--model_sql_generate` | Model name for stage 2 (SQL generation). |
+| `--model_sql_merge` | Model name for stage 3 (merge / correction). |
+
+**Sampling** — CSC-SQL draws multiple LLM samples per stage and votes:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--n_table_link` | 4 | Sampling count for stage 1. |
+| `--n_sql_generate` | 8 | Sampling count for stage 2. |
+| `--n_sql_merge` | 4 | Sampling count for stage 3. |
+| `--temperature_table_link` | 0.8 | Stage 1 sampling temperature. |
+| `--temperature_sql_generate` | 0.8 | Stage 2 sampling temperature. |
+| `--temperature_sql_merge` | 0.8 | Stage 3 sampling temperature. |
+| `--history_k` | 3 | Top-K history queries to retrieve (basesql/din-sql/MAC-SQL hardcode 3). |
+| `--prompt_name` | `think` | Prompt variant. |
+| `--bm25_index_path` | auto | BM25 column-value index. |
+| `--value_limit_num` | 2 | Sampled values per column. |
+| `--seed` | 42 | Random seed. |
+
+**vLLM inference server** — for local GPU inference:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--visible_devices` | `0` | `CUDA_VISIBLE_DEVICES`. |
+| `--tensor_parallel_size` | 1 | vLLM TP size. |
+| `--gpu_memory_utilization` | 0.90 | vLLM GPU memory fraction. |
+| `--quantization` | `bitsandbytes` | `bitsandbytes` (INT8) or `None` (bf16). |
+| `--api_base_generate` | none | Remote vLLM server URL for stages 1+2 (skips local startup). |
+| `--api_base_merge` | none | Remote vLLM server URL for stage 3. |
+
+**Reuse / resume**:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--stage1_from` | `auto` | Reuse a prior run's stage-1 outputs. `auto`, `fresh`, or a path. |
+| `--stage0_from` | none | Use a prior run's stage 1 as a stage-0 schema pre-prune. Requires `--cluster_filter`, `--cluster`, `--history_path`. |
+| `--skip_preprocess` | off | Skip preprocessing; use existing `--input_file`. |
+| `--input_file` | none | Pre-existing processed JSON (skips preprocessing). |
+
+**Eval & output**:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--run_eval` | off | Run gold-SQL execution for EX accuracy. Predicted SQLs are still produced regardless. |
+| `--eval_step` | `pipeline` | Which step to run/eval. |
+| `--eval_mode` | `major_voting` | How to aggregate samples into a single SQL. |
+| `--output_dir` | `outputs` | Where to write results. |
+| `--run_time` | auto | Run-id suffix; defaults to current timestamp. |
+
+### MAC-SQL
+
+MAC-SQL is the original multi-agent design (Selector → Decomposer →
+Refiner) with our schema-restriction additions bolted on. It accepts the
+**common flags** with the same names and semantics as basesql:
+`--dataset`, `--csv_path`, `--db_path`, `--rows`, `--question_col`,
+`--sql_col`, `--rename`, `--mapping_path`, `--view`, `--history`,
+`--history_path`, `--cluster`, `--cluster_filter`.
+
+The flags below are MAC-SQL-specific:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--output_file` | required | Path to output JSONL file (MAC-SQL writes JSONL, not CSV). |
+| `--log_file` | none | Path to prompt log file. |
+| `--fresh` | off | Ignore previous output and start over. Default: resume from prior `--output_file`. |
+| `--without_selector` | off | Skip the Selector agent entirely — Decomposer sees the full schema. (Conceptually distinct from `--use_linking` in basesql/din-sql.) |
+| `--history_sql_col_prefix` | auto | Override the SQL-column prefix in the history CSV (auto-derived from `--dataset` + `--rename`: `workload_updated_` / `renamed_` / `''`). Rarely needed. |
 
 ---
 

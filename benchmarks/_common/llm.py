@@ -71,12 +71,20 @@ def get_chat() -> ChatOpenAI:
     return CHAT
 
 
-def chat_with_chatgpt(prompt: str, model: str = "gpt-4.1-mini") -> str:
-    """Direct call to the OpenAI client; returns the assistant message text."""
+def chat_with_chatgpt(
+    prompt: str,
+    model: str = "gpt-4.1-mini",
+    max_tokens: int = 10000,
+) -> str:
+    """Direct call to the OpenAI client; returns the assistant message text.
+
+    ``max_tokens`` caps ``max_completion_tokens`` (default 10000). Bump it for
+    long structured outputs (e.g. multi-view rename prompts).
+    """
     response = get_openai_client().chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
-        n=1, stream=False, temperature=0.0, max_completion_tokens=10000,
+        n=1, stream=False, temperature=0.0, max_completion_tokens=max_tokens,
         top_p=1.0, frequency_penalty=0.0, presence_penalty=0.0,
     )
     return response.choices[0].message.content
@@ -86,15 +94,16 @@ def chat_with_gemini(
     prompt: str,
     model: str = "gemini-2.5-flash-lite",
     response_fields: Optional[Dict[str, type]] = None,
+    max_tokens: int = 10000,
 ) -> str:
     """Call Gemini. If ``response_fields`` is provided (e.g. ``{"SQL": str}``),
-    use structured output.
+    use structured output. ``max_tokens`` caps ``max_output_tokens``.
     """
     from google.genai import types
     from pydantic import create_model
 
     config_kwargs: Dict[str, Any] = dict(
-        temperature=0.0, max_output_tokens=10000, top_p=1.0
+        temperature=0.0, max_output_tokens=max_tokens, top_p=1.0
     )
     if response_fields:
         schema_model = create_model(

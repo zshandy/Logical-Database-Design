@@ -28,23 +28,29 @@ from core import spider_constants
 
 def resolve_dataset_config(dataset: str, rename: bool):
     """
-    Returns (sqlite_path, tables, linking_filename, cluster_prefix) for the given dataset + rename.
+    Returns (sqlite_path, tables, cluster_prefix) for the given dataset + rename.
     cluster_prefix is the SQL-column prefix in the history CSV (e.g. '' → reads 'SQL',
-    'renamed_' → reads 'renamed_SQL'). linking_filename is under the MAC-SQL-main directory.
+    'renamed_' → reads 'renamed_SQL').
+
+    The legacy on-disk schema-linking JSON has no default — when the user opts
+    into ``--linking_source disk`` they must pass ``--linking_filename PATH``
+    (absolute or relative) explicitly. Default linking is ``selector``.
     """
     if dataset == 'spider':
         sqlite_path = spider_constants.SQLITE_PATH
         tables = spider_constants.RENAMED_TABLES if rename else spider_constants.ORG_TABLES
-        linking_filename = 'renamed_history_linking_spider.json' if rename else 'history_linking_spider.json'
         cluster_prefix = 'renamed_' if rename else ''
     elif dataset == 'bird':
         sqlite_path = BIRD_SQLITE_PATH
         tables = BIRD_RENAMED_TABLES if rename else BIRD_ORG_TABLES
-        linking_filename = 'workload_updated_history_linking.json' if rename else 'history_linking.json'
-        cluster_prefix = 'workload_updated_' if rename else ''
+        # cluster_prefix is the SQL-column prefix in the history CSV. Aligned
+        # with basesql + prep_database: when --rename is on, the rewritten SQL
+        # column is 'renamed_SQL' (written by prep_database Phase 5), not
+        # 'workload_updated_SQL'.
+        cluster_prefix = 'renamed_' if rename else ''
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
-    return sqlite_path, tables, linking_filename, cluster_prefix
+    return sqlite_path, tables, cluster_prefix
 
 
 def get_cluster_view_list(dataset: str, rename: bool):
@@ -59,7 +65,7 @@ def get_cluster_view_list(dataset: str, rename: bool):
 from core.chat_manager import ChatManagerUnion
 from core.utils import replace_multiple_spaces, load_jsonl_file
 from core.schema_generator import generate_schema_prompt
-from core.const import SYSTEM_NAME
+from core.const import SELECTOR_NAME, SYSTEM_NAME
 from tqdm import tqdm
 import pandas as pd
 import time
@@ -519,7 +525,12 @@ def run_from_csv(
     dataset: str = 'bird',
     linking_filename: str = None,
     limit: int = 0,
-    cluster_filter: bool = False
+    cluster_filter: bool = False,
+    cluster_path: str = None,
+    linking_source: str = 'selector',
+    view_sql_col_override: str = None,
+    sql_col_override: str = None,
+    column_suffix: str = "",
 ):
     """Run MAC-SQL pipeline from CSV input using original pipeline."""
 
@@ -541,33 +552,122 @@ def run_from_csv(
     ref_embs = None
     history_df = None
     exact_clusters = None
+    question_cluster_map: list = []
     history_linking = None
     use_cluster_mode = False
     selected_cluster_views = None
     _view_schema_cache = {}
 
-    # Load linking file if we need clusters (either for history retrieval or view injection)
+    # Build the per-INPUT-row linking that gates --cluster_filter. How we
+    # derive `retrieved_tables` depends on --linking_source:
+    #   - 'selector' (default): no pre-build here; we'll run Selector once per
+    #     row with the full schema in the row loop below and read its
+    #     extracted_schema. Honest (no gold leak), 1 extra LLM call per row.
+    #   - 'gold': peek at df['gt_renamed_tables'] / df['gt_tables'] translated
+    #     through table_to_view. Fast but uses gold labels — smoke tests only.
+    #   - 'disk': load the legacy workload_updated_history_linking.json from
+    #     this script's directory. May be stale w.r.t. current prep_database.
     need_linking = bool(history_csv) or view
-    if need_linking:
-        linking_basename = linking_filename or f"{cluster}history_linking.json"
-        # Linking files live alongside this script (.../benchmarks/MAC-SQL/<linking_basename>).
-        linking_path = os.path.join(_THIS_DIR, linking_basename)
+    _t2v_lower: dict = {}
+    if need_linking and cluster_path and os.path.exists(cluster_path):
+        try:
+            with open(cluster_path, encoding='utf-8') as _f:
+                _prep = json.load(_f)
+            if isinstance(_prep.get('rename'), dict) and 'table_to_view' in _prep['rename']:
+                _t2v_lower = {str(k).lower(): str(v) for k, v in _prep['rename']['table_to_view'].items()}
+            elif 'table_to_view' in _prep:
+                _t2v_lower = {str(k).lower(): str(v) for k, v in _prep['table_to_view'].items()}
+        except Exception:
+            pass
+
+    if need_linking and linking_source == 'gold':
+        import ast as _ast_input
+
+        def _parse_list_cell(_val):
+            try:
+                _tl = _ast_input.literal_eval(_val) if isinstance(_val, str) else _val
+            except Exception:
+                return None
+            return list(_tl) if isinstance(_tl, (list, tuple)) else None
+
+        _derived_input: dict = {}
+        if 'gt_renamed_tables' in df.columns:
+            for _i, _val in enumerate(df['gt_renamed_tables'].tolist()):
+                _tl = _parse_list_cell(_val)
+                if _tl is not None:
+                    _derived_input[str(_i)] = [str(_t) for _t in _tl]
+            _src = "df['gt_renamed_tables']"
+        elif 'gt_tables' in df.columns:
+            for _i, _val in enumerate(df['gt_tables'].tolist()):
+                _tl = _parse_list_cell(_val)
+                if _tl is None:
+                    continue
+                if rename and _t2v_lower:
+                    _mapped = [_t2v_lower.get(str(_t).lower(), str(_t)) for _t in _tl]
+                else:
+                    _mapped = [str(_t) for _t in _tl]
+                _derived_input[str(_i)] = _mapped
+            _src = "df['gt_tables']" + (" -> table_to_view" if rename and _t2v_lower else "")
+        else:
+            _src = None
+
+        if _derived_input:
+            history_linking = _derived_input
+            print(f"⚠️  GOLD-LABEL LINKING (testing only): derived per-row linking from {_src} ({len(_derived_input)} entries).")
+        else:
+            print("Note: --linking_source=gold requested but input CSV has no gt_tables / gt_renamed_tables column.")
+    elif need_linking and linking_source == 'disk':
+        # disk mode requires an explicit --linking_filename (absolute path or
+        # path relative to this script's directory). No default — if you opt
+        # into 'disk', you point at the file. This avoids silently picking up
+        # a stale CamelCase legacy file from a prior naming convention.
+        if not linking_filename:
+            raise SystemExit(
+                "--linking_source=disk requires --linking_filename PATH (absolute or relative to "
+                + _THIS_DIR + ")."
+            )
+        linking_path = linking_filename if os.path.isabs(linking_filename) else os.path.join(_THIS_DIR, linking_filename)
         if os.path.exists(linking_path):
             with open(linking_path, 'r', encoding='utf-8') as f:
                 history_linking = json.load(f)
-            print(f"Loaded history linking from {linking_path} ({len(history_linking)} entries)")
+            print(f"Loaded history linking from {linking_path} ({len(history_linking)} entries) [user-supplied disk file]")
         else:
-            print(f"Note: Linking file not found: {linking_path}")
+            raise SystemExit(f"--linking_source=disk requested but file not found: {linking_path}")
+    elif need_linking and linking_source == 'selector':
+        print("Linking source: 'selector' — will run Selector once per row with full schema to pick tables for cluster_filter (1 extra LLM call per row, no gold leak).")
 
     # Pre-cache view schemas (needed whenever --view is on, with or without history)
     if view:
-        spider_view_list = get_cluster_view_list(dataset, rename)
-        if spider_view_list is not None:
-            selected_cluster_views = spider_view_list
-        else:
-            cluster_prefix = f"{cluster}cluster"
-            all_db_objects = list_tables_and_views(sqlite_path)
-            selected_cluster_views = [x for x in all_db_objects if x.startswith(cluster_prefix) and not x.startswith(cluster_prefix + "workload_")]
+        # Priority order for the cluster-view list:
+        #   1. prep_database JSON (cluster_path == args.mapping_path) — source of truth
+        #      when --mapping_path is in use. Today's prep produces view names like
+        #      'bank_account_dim_join_bank_district_dim' that don't share any prefix
+        #      with the historical 'workload_updated_cluster<n>_...' scheme.
+        #   2. dataset constants (spider only — bird returns None).
+        #   3. DB introspection with the legacy '{cluster_prefix}cluster' filter
+        #      (kept as last-resort fallback for older runs without a JSON).
+        selected_cluster_views = None
+        if cluster_path and os.path.exists(cluster_path):
+            try:
+                import sys as _sys_v
+                _bench_root_v = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+                if _bench_root_v not in _sys_v.path:
+                    _sys_v.path.insert(0, _bench_root_v)
+                from _common.rename_mapping import load_active_views as _load_av
+                _, _json_views = _load_av(cluster_path)
+                if _json_views:
+                    selected_cluster_views = _json_views
+                    print(f"View list: {len(_json_views)} cluster_views from {os.path.basename(cluster_path)}")
+            except Exception as _e:
+                print(f"Note: could not read cluster_views from {cluster_path}: {_e}")
+        if selected_cluster_views is None:
+            spider_view_list = get_cluster_view_list(dataset, rename)
+            if spider_view_list is not None:
+                selected_cluster_views = spider_view_list
+            else:
+                cluster_prefix = f"{cluster}cluster"
+                all_db_objects = list_tables_and_views(sqlite_path)
+                selected_cluster_views = [x for x in all_db_objects if x.startswith(cluster_prefix) and not x.startswith(cluster_prefix + "workload_")]
         for view_name in selected_cluster_views:
             schema_str, _ = generate_schema_prompt(sqlite_path, [view_name])
             _view_schema_cache[view_name] = schema_str
@@ -580,13 +680,48 @@ def run_from_csv(
         assert 'question' in history_df.columns, f"History CSV must have 'question' column"
         assert sql_col_name in history_df.columns, f"History CSV must have '{sql_col_name}' column"
 
-        if history_linking is not None:
-            print("Building clusters from history...")
-            exact_clusters = build_clusters_from_history(history_df, cluster, view=view)
+        # Load exact_clusters + question_cluster_map whenever clustering is
+        # needed (history_linking present OR linking_source=='selector').
+        # question_cluster_map is precomputed workload metadata — we use it to
+        # look up history rows' cluster IDs at retrieval time so we can pick a
+        # cluster for the test question WITHOUT touching any gt_* column.
+        if history_linking is not None or linking_source == 'selector':
+            exact_clusters = None
+            if cluster_path and os.path.exists(cluster_path):
+                print(f"Loading precomputed clusters from {cluster_path}")
+                with open(cluster_path, encoding="utf-8") as f:
+                    _payload = json.load(f)
+                # Shape sniff: consolidated (nested 'cluster' section) /
+                # legacy flat ('exact_clusters' at top) / raw list dump.
+                if isinstance(_payload, list):
+                    exact_clusters = _payload
+                elif isinstance(_payload.get("cluster"), dict) and "exact_clusters" in _payload["cluster"]:
+                    exact_clusters = _payload["cluster"]["exact_clusters"]
+                    if "question_cluster_map" in _payload["cluster"]:
+                        question_cluster_map = _payload["cluster"]["question_cluster_map"]
+                elif "exact_clusters" in _payload:
+                    exact_clusters = _payload["exact_clusters"]
+                    if "question_cluster_map" in _payload:
+                        question_cluster_map = _payload["question_cluster_map"]
+                if exact_clusters:
+                    print(f"Loaded {len(exact_clusters)} clusters" +
+                          (f" + {len(question_cluster_map)} question_cluster_map entries" if question_cluster_map else ""))
+                else:
+                    print(f"  (no cluster section in {cluster_path}; building from history)")
+            if not exact_clusters:
+                print("Building clusters from history...")
+                exact_clusters = build_clusters_from_history(history_df, cluster, view=view)
             use_cluster_mode = True
             print("Cluster mode enabled.")
 
-        if not use_cluster_mode or not use_cluster:
+        # Embedding load: we need ref_embs whenever (a) we're in the non-cluster
+        # fallback path, or (b) linking_source=='selector' and cluster_filter is
+        # off (we use embeddings + question_cluster_map to pick a cluster
+        # without running Selector twice).
+        _need_embs = (not use_cluster_mode) or (not use_cluster) or (
+            linking_source == 'selector' and not cluster_filter
+        )
+        if _need_embs:
             print(f"Loading history embeddings from {history_csv} ({len(history_df)} rows, SQL col: '{sql_col_name}')...")
             ref_pairs, ref_embs = prepare_reference_embeddings(list(history_df['question']))
             print(f"History embeddings ready.")
@@ -632,21 +767,115 @@ def run_from_csv(
             user_message['use_history'] = use_history
 
             # Add history SQLs and/or view schema (cluster-based)
-            has_clusters = exact_clusters is not None and history_linking is not None
+            has_clusters = exact_clusters is not None and (
+                history_linking is not None or linking_source == 'selector'
+            )
             if has_clusters:
                 # Cluster mode: find relevant clusters and build filtered embeddings
                 sql_col_name = f'{cluster}SQL'
 
-                # Get retrieved tables from linking (try both str and int keys)
-                idx_key = str(idx) if str(idx) in history_linking else idx
-                col_list = history_linking.get(idx_key, history_linking.get(str(idx), []))
-                print(f"DEBUG: idx={idx}, idx_key={idx_key}, col_list={col_list}")
-
-                # Extract table names from column list (format: "table.column" or just "table")
-                retrieved_tables = list(set(
-                    x.split(".")[0] if "." in x else x
-                    for x in col_list
-                ))
+                if linking_source == 'selector' and cluster_filter:
+                    # Honest pre-pass: run Selector once with the FULL schema (no
+                    # filtered_tables, no view_schema, no top_sqls), then read
+                    # its extracted_schema to get candidate tables for cluster
+                    # matching. Costs 1 extra LLM call per row, no gold leak.
+                    #
+                    # Selector's output format is {table: "keep_all"|"drop_all"|[cols]}.
+                    # It emits ONE entry per table, including "drop_all" for
+                    # tables it marks as irrelevant. To get the actually-relevant
+                    # tables, keep only entries whose value is a non-empty
+                    # column list (Selector actively picked columns) OR exactly
+                    # "keep_all". Exclude "drop_all" and empty lists.
+                    pre_pass_msg = init_message(idx, question, ground_truth)
+                    pre_pass_msg['send_to'] = SELECTOR_NAME
+                    pre_pass_msg['use_history'] = False  # keep the pre-pass prompt small
+                    retrieved_tables = []
+                    try:
+                        chat_manager.chat_group[0].talk(pre_pass_msg)
+                        _ext = pre_pass_msg.get('extracted_schema', {}) or {}
+                        if isinstance(_ext, dict):
+                            _kept = set()
+                            for _t, _v in _ext.items():
+                                if isinstance(_v, str):
+                                    if _v.strip().lower() == "drop_all":
+                                        continue
+                                    _kept.add(str(_t))
+                                elif isinstance(_v, (list, tuple)):
+                                    if len(_v) > 0:
+                                        _kept.add(str(_t))
+                            retrieved_tables = sorted(_kept)
+                    except Exception as _e:
+                        print(f"DEBUG: idx={idx} selector pre-pass failed: {_e}")
+                        retrieved_tables = []
+                    # Fallback: if Selector kept "everything" (size close to the
+                    # full schema), it didn't actually prune. Switch to the
+                    # embedding+question_cluster_map approach so cluster_filter
+                    # has a meaningful subset to work with.
+                    _total = len(tables) if tables else 0
+                    if _total and len(retrieved_tables) >= max(int(0.8 * _total), _total - 5):
+                        if (ref_pairs is not None and ref_embs is not None
+                                and question_cluster_map and exact_clusters):
+                            try:
+                                _top = topk_embedding_cosine_sim(question, ref_pairs, ref_embs, top_k=3)
+                                _id_to_tables = {c['cluster_id']: c.get('tables', []) for c in exact_clusters}
+                                _u: set = set()
+                                for _x in _top:
+                                    _i = _x[0]
+                                    if _i < 0 or _i >= len(question_cluster_map):
+                                        continue
+                                    _cids = question_cluster_map[_i]
+                                    if not isinstance(_cids, (list, tuple)):
+                                        _cids = [_cids]
+                                    for _cid in _cids:
+                                        _u.update(_id_to_tables.get(_cid, []))
+                                if _u:
+                                    retrieved_tables = sorted(str(t) for t in _u)
+                                    print(f"DEBUG: idx={idx} selector returned ~all tables; falling back to embedding+question_cluster_map")
+                            except Exception:
+                                pass
+                    print(f"DEBUG: idx={idx}, linking_source=selector (pre-pass), retrieved_tables={retrieved_tables}")
+                elif linking_source == 'selector' and not cluster_filter:
+                    # cluster_filter=off → skip the Selector pre-pass (the main
+                    # Selector pass sees the full schema either way, so a pre-pass
+                    # would be redundant). To still pick a cluster for context
+                    # injection without an extra LLM call AND without touching any
+                    # gt_* column of the test row, we:
+                    #   (a) BGE-embed the test question, find top-K nearest history
+                    #       questions via cosine similarity, and
+                    #   (b) look up those history rows' cluster IDs in
+                    #       question_cluster_map (precomputed workload metadata),
+                    #       then map each cluster ID to its tables via exact_clusters.
+                    # No gt_tables / gt_columns are ever read.
+                    retrieved_tables = []
+                    if (ref_pairs is not None and ref_embs is not None
+                            and question_cluster_map and exact_clusters):
+                        try:
+                            _top = topk_embedding_cosine_sim(question, ref_pairs, ref_embs, top_k=3)
+                            _id_to_tables = {c['cluster_id']: c.get('tables', []) for c in exact_clusters}
+                            _u: set = set()
+                            for _x in _top:
+                                _i = _x[0]
+                                if _i < 0 or _i >= len(question_cluster_map):
+                                    continue
+                                _cids = question_cluster_map[_i]
+                                if not isinstance(_cids, (list, tuple)):
+                                    _cids = [_cids]
+                                for _cid in _cids:
+                                    _u.update(_id_to_tables.get(_cid, []))
+                            retrieved_tables = sorted(str(t) for t in _u)
+                        except Exception as _e:
+                            print(f"DEBUG: idx={idx} embedding+cluster-id retrieval failed: {_e}")
+                    print(f"DEBUG: idx={idx}, linking_source=selector (embedding→question_cluster_map, no pre-pass), retrieved_tables={retrieved_tables}")
+                else:
+                    # gold / disk: look up the pre-built history_linking dict.
+                    idx_key = str(idx) if str(idx) in history_linking else idx
+                    col_list = history_linking.get(idx_key, history_linking.get(str(idx), []))
+                    print(f"DEBUG: idx={idx}, idx_key={idx_key}, col_list={col_list}")
+                    # Extract table names from column list (format: "table.column" or just "table")
+                    retrieved_tables = list(set(
+                        x.split(".")[0] if "." in x else x
+                        for x in col_list
+                    ))
 
                 # Find clusters (needed for view_schema and optionally for top_sqls)
                 res = None
@@ -675,9 +904,11 @@ def run_from_csv(
                         if res and res['questions'] and res['indices']:
                             temp_texts, temp_embs = prepare_reference_embeddings(res['questions'], indices=res['indices'])
                             top_results = topk_embedding_cosine_sim(question, temp_texts, temp_embs, top_k=3)
-                            top_sqls = " \n".join(history_df.loc[[x[0] for x in top_results], sql_col_name].to_list())
+                            _sql_col = sql_col_override or sql_col_name
+                            _view_col = view_sql_col_override or f'{cluster}view_SQL'
+                            top_sqls = " \n".join(history_df.loc[[x[0] for x in top_results], _sql_col].to_list())
                             if view:
-                                top_sqls += " \n" + " \n".join(history_df.loc[[x[0] for x in top_results], f'{cluster}view_SQL'].to_list())
+                                top_sqls += " \n" + " \n".join(history_df.loc[[x[0] for x in top_results], _view_col].to_list())
                             paths_str = ', \n'.join(list(set(res['paths'])))
                             user_message['top_sqls'] = top_sqls
                             user_message['paths_str'] = paths_str
@@ -686,9 +917,11 @@ def run_from_csv(
                             user_message['paths_str'] = ""
                     else:
                         top_results = topk_embedding_cosine_sim(question, ref_pairs, ref_embs, top_k=3)
-                        top_sqls = " \n".join(history_df.loc[[x[0] for x in top_results], sql_col_name].to_list())
+                        _sql_col = sql_col_override or sql_col_name
+                        _view_col = view_sql_col_override or f'{cluster}view_SQL'
+                        top_sqls = " \n".join(history_df.loc[[x[0] for x in top_results], _sql_col].to_list())
                         if view:
-                            top_sqls += " \n" + " \n".join(history_df.loc[[x[0] for x in top_results], f'{cluster}view_SQL'].to_list())
+                            top_sqls += " \n" + " \n".join(history_df.loc[[x[0] for x in top_results], _view_col].to_list())
                         user_message['top_sqls'] = top_sqls
 
                 # View mode: look up cached cluster view schemas (independent of use_cluster)
@@ -748,6 +981,28 @@ def run_from_csv(
         json.dump(eval_results, f, ensure_ascii=False, indent=2)
     print(f"Evaluation file saved to {eval_file}")
 
+    # Write predictions back to the input CSV so multiple runs accumulate
+    # side-by-side, then compute EX for the final SQL column.
+    import sys as _sys_wb
+    _bench_root_wb = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    if _bench_root_wb not in _sys_wb.path:
+        _sys_wb.path.insert(0, _bench_root_wb)
+    from _common.evaluate import write_back_to_input_csv
+    _macsql_col = f"macsql{column_suffix}"
+    _pred_df = pd.DataFrame(
+        {_macsql_col: [replace_multiple_spaces(o.get('pred', '').strip()) for o in output_data]},
+        index=[o['idx'] for o in output_data],
+    )
+    write_back_to_input_csv(
+        csv_path=csv_path,
+        df_predicted=_pred_df,
+        column_names=[_macsql_col],
+        final_sql_col=_macsql_col,
+        db_path=sqlite_path,
+        gold_sql_col="SQL",
+        pipeline_tag="MAC-SQL",
+    )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -765,17 +1020,24 @@ if __name__ == "__main__":
     parser.add_argument('--db_path', type=str, default=None,
                         help="Path to SQLite database. If omitted, uses the dataset's built-in "
                              "constant (BIRD_SQLITE_PATH / spider_constants.SQLITE_PATH).")
-    parser.add_argument('--output_file', type=str, required=True,
-                        help="Path to output JSONL file (required).")
+    parser.add_argument('--model', type=str, default='gpt-4.1-mini',
+                        help="OpenAI model. Default: gpt-4.1-mini (matches basesql/din-sql). "
+                             "Overrides MODEL_NAME in core/api_config.py at runtime.")
+    parser.add_argument('--output_file', type=str, default=None,
+                        help="Path to output JSONL file. If omitted, auto-resolves to "
+                             "<LDD>/outputs/MAC-SQL/<dataset>/run_<timestamp><suffix>.jsonl.")
     parser.add_argument('--log_file', type=str, default=None,
-                        help="Path to prompt log file (optional).")
+                        help="Path to prompt log file. If omitted, auto-resolves to "
+                             "<LDD>/logs/MAC-SQL/<dataset>/run_<timestamp><suffix>.log.")
     parser.add_argument('--rows', type=str, default=None, metavar='SPEC',
                         help="Row selection. 'N' for the first N rows, or 'START:END' for a python-style "
                              "half-open slice (e.g. '100:150' = 50 rows starting at index 100).")
-    parser.add_argument('--question_col', type=str, default='question',
-                        help="Input-CSV column holding the question. Default: 'question'.")
-    parser.add_argument('--sql_col', type=str, default='SQL',
-                        help="Input-CSV column holding the (optional) ground-truth SQL. Default: 'SQL'.")
+    parser.add_argument('--question_col', type=str, default=None,
+                        help="Input-CSV column holding the question. If omitted, auto-resolves "
+                             "from the mapping JSON's columns.question (default 'question').")
+    parser.add_argument('--sql_col', type=str, default=None,
+                        help="Input-CSV column holding the (optional) ground-truth SQL. If omitted, "
+                             "auto-resolves from the mapping JSON's columns.sql (default 'SQL').")
     parser.add_argument('--fresh', action='store_true',
                         help="Ignore previous output and start over. Default: resume from prior --output_file.")
 
@@ -807,6 +1069,19 @@ if __name__ == "__main__":
     parser.add_argument('--cluster', action='store_true',
                         help="Restrict history retrieval to cluster-matched questions and inject "
                              "common-join-paths into the Decomposer's prompt.")
+    parser.add_argument('--linking_source', type=str, default='selector',
+                        choices=['selector', 'gold', 'disk'],
+                        help="How to derive the per-row table list that gates --cluster_filter. "
+                             "'selector' (default): run Selector once with the full schema as an honest "
+                             "pre-pass, take its picked tables, then re-run Selector on the cluster-filtered "
+                             "schema (1 extra LLM call per row, no gold leak). "
+                             "'gold': peek at df['gt_tables'] translated through table_to_view — fast but "
+                             "uses gold labels, valid only for smoke tests. "
+                             "'disk': load a user-supplied schema-linking JSON; requires --linking_filename.")
+    parser.add_argument('--linking_filename', type=str, default=None,
+                        help="Required when --linking_source=disk. Absolute path to a per-row schema-linking "
+                             "JSON, or a filename relative to benchmarks/MAC-SQL/. No default — if you opt "
+                             "into 'disk', you point at the file explicitly.")
     parser.add_argument('--cluster_filter', action=argparse.BooleanOptionalAction, default=None,
                         help="Pre-filter the Selector's input schema to only tables in any matched cluster. "
                              "Empty match → fall back to full schema. Output paths auto-substitute "
@@ -842,6 +1117,18 @@ if __name__ == "__main__":
     if args.cluster_filter is None:
         args.cluster_filter = bool(args.cluster)
 
+    # Cluster precomputed file: re-use --mapping_path (the consolidated prep config
+    # holds both the rename mapping and the cluster section).
+    if args.cluster and not args.mapping_path:
+        _suffix = "_renamed" if args.rename else ""
+        _cand = _os.path.join(_ldd_root, "mapping_files", f"prep_{args.dataset}{_suffix}.json")
+        args.mapping_path = _cand
+        if _os.path.exists(_cand):
+            print(f"[run_union] --mapping_path auto-resolved to {_cand}")
+        else:
+            print(f"[run_union] --mapping_path auto-resolved to {_cand} "
+                  f"(not found — will build clusters from history)")
+
     # --mapping_path: override the module-level mapping constant for the active dataset.
     if args.mapping_path:
         if not _os.path.exists(args.mapping_path):
@@ -854,13 +1141,67 @@ if __name__ == "__main__":
             _sel.MAPPING_PATH = args.mapping_path
         print(f"--mapping_path override: {args.mapping_path}")
 
-    # Resolve dataset-specific sqlite path, table list, linking file, and default cluster prefix
-    sqlite_path, tables, linking_filename, default_cluster = resolve_dataset_config(args.dataset, args.rename)
+    # Resolve dataset-specific sqlite path, table list, and default cluster prefix
+    sqlite_path, tables, default_cluster = resolve_dataset_config(args.dataset, args.rename)
     if args.db_path:
         sqlite_path = args.db_path
         print(f"--db_path override: {sqlite_path}")
     if args.history_sql_col_prefix is None:
         args.history_sql_col_prefix = default_cluster
+
+    # JSON-as-source-of-truth: when a mapping file is supplied, its top-level
+    # ``tables`` drives the active table list — applies regardless of --rename,
+    # since the JSON records the right list for whichever mode prep_database
+    # ran in (original base names without --rename, renamed views with it).
+    if args.mapping_path and _os.path.exists(args.mapping_path):
+        import sys as _sys_for_view
+        _bench_root_for_view = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), _os.pardir))
+        if _bench_root_for_view not in _sys_for_view.path:
+            _sys_for_view.path.insert(0, _bench_root_for_view)
+        from _common.rename_mapping import load_active_views
+        _json_tables, _json_views = load_active_views(args.mapping_path)
+        if _json_tables:
+            print(f"📋 --mapping_path: using {len(_json_tables)} tables from {_os.path.basename(args.mapping_path)}")
+            tables = _json_tables
+
+    # Fill --question_col / --sql_col / history_sql_col_prefix from the mapping
+    # JSON's 'columns' section when the user did not pass them explicitly.
+    # Precedence: explicit CLI > mapping JSON > static default.
+    if args.mapping_path and _os.path.exists(args.mapping_path):
+        import sys as _sys_for_cols
+        _bench_root_for_cols = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), _os.pardir))
+        if _bench_root_for_cols not in _sys_for_cols.path:
+            _sys_for_cols.path.insert(0, _bench_root_for_cols)
+        from _common.rename_mapping import load_active_columns
+        _json_cols = load_active_columns(args.mapping_path)
+        if args.question_col is None:
+            args.question_col = _json_cols.get("question", "question")
+            if _json_cols.get("question"):
+                print(f"--question_col auto-resolved to {args.question_col!r} (from mapping JSON)")
+        if args.sql_col is None:
+            args.sql_col = _json_cols.get("sql", "SQL")
+            if _json_cols.get("sql"):
+                print(f"--sql_col auto-resolved to {args.sql_col!r} (from mapping JSON)")
+        # MAC-SQL's history retrieval reads f'{prefix}SQL' / f'{prefix}view_SQL'.
+        # Derive the prefix from columns.sql when the user did not set it.
+        if args.history_sql_col_prefix is None and _json_cols.get("sql"):
+            _sql_name = _json_cols["sql"]
+            if _sql_name.endswith("SQL"):
+                args.history_sql_col_prefix = _sql_name[:-3]
+                print(f"--history_sql_col_prefix auto-resolved to {args.history_sql_col_prefix!r} (from mapping JSON columns.sql={_sql_name!r})")
+        # Stash the full view_sql column name as an attribute so run_from_csv
+        # can pass it through as view_sql_col_override. Without this, the
+        # f'{prefix}view_SQL' construction silently writes 'view_SQL' when the
+        # prep was run with a custom --view_sql_col (e.g. my_custom_view_sql).
+        if _json_cols.get("view_sql"):
+            args.view_sql_col = _json_cols["view_sql"]
+            print(f"--view_sql_col auto-resolved to {args.view_sql_col!r} (from mapping JSON columns.view_sql)")
+    if args.question_col is None:
+        args.question_col = "question"
+    if args.sql_col is None:
+        args.sql_col = "SQL"
+    if not hasattr(args, "view_sql_col"):
+        args.view_sql_col = None
 
     # Parse --rows SPEC -> (start_pos, limit)
     _start_pos = 0
@@ -883,16 +1224,67 @@ if __name__ == "__main__":
         args.output_file = _cf_rewrite(args.output_file)
         args.log_file = _cf_rewrite(args.log_file)
 
-    # Auto-prefix output_file with outputs/{dataset}/ when the path is relative
-    if not os.path.isabs(args.output_file):
-        if not args.output_file.replace('\\', '/').startswith(f'outputs/{args.dataset}/'):
-            args.output_file = os.path.join('outputs', args.dataset, args.output_file)
+    # Path auto-resolution: route artifacts under LDD/{outputs,logs}/MAC-SQL/<dataset>/
+    # so they don't flood the benchmarks folder. Defaults mirror basesql's
+    # naming: run_<timestamp><suffix>.{jsonl,log}.
+    import sys as _sys
+    import time as _time
+    _bench_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    if _bench_root not in _sys.path:
+        _sys.path.insert(0, _bench_root)
+    from _common.paths import default_log_dir, default_output_dir
+
+    def _macsql_suffix(a: argparse.Namespace) -> str:
+        s = ""
+        if a.rename: s += "_rename"
+        if a.view: s += "_withview"
+        if a.cluster: s += "_clusterfilter" if a.cluster_filter else "_cluster"
+        if a.history: s += "_history"
+        if a.without_selector: s += "_noselector"
+        if a.model and a.model != "gpt-4.1-mini":
+            digits = "".join(c for c in a.model if c.isdigit())
+            s += f"_gpt{digits}"
+        return s
+
+    _run_id = _time.strftime("%Y%m%d-%H%M%S")
+    _run_tag = f"run_{_run_id}{_macsql_suffix(args)}"
+
+    if args.output_file is None:
+        args.output_file = os.path.join(
+            default_output_dir("MAC-SQL", args.dataset), f"{_run_tag}.jsonl"
+        )
+    elif not os.path.isabs(args.output_file):
+        args.output_file = os.path.join(
+            default_output_dir("MAC-SQL", args.dataset), args.output_file
+        )
+
+    if args.log_file is None:
+        args.log_file = os.path.join(
+            default_log_dir("MAC-SQL", args.dataset), f"{_run_tag}.log"
+        )
+    elif not os.path.isabs(args.log_file):
+        args.log_file = os.path.join(
+            default_log_dir("MAC-SQL", args.dataset), args.log_file
+        )
+
+    os.makedirs(os.path.dirname(args.output_file) or '.', exist_ok=True)
+    os.makedirs(os.path.dirname(args.log_file) or '.', exist_ok=True)
+
+    # --model override: mutate MODEL_NAME in BOTH api_config and llm modules
+    # (llm did `from core.api_config import MODEL_NAME` which creates a local
+    # binding, so we must set both for the change to take effect everywhere).
+    if args.model != 'gpt-4.1-mini':
+        from core import api_config as _api_cfg
+        from core import llm as _llm_mod
+        _api_cfg.MODEL_NAME = args.model
+        _llm_mod.MODEL_NAME = args.model
+        print(f"--model override: {args.model}")
 
     print("Configuration:")
     print(f"  Dataset: {args.dataset}")
     print(f"  SQLite path: {sqlite_path}")
     print(f"  Tables: {len(tables)} ({'renamed' if args.rename else 'original'})")
-    print(f"  Linking file: {linking_filename}")
+    print(f"  Linking source: {args.linking_source}" + (f" (--linking_filename={args.linking_filename!r})" if getattr(args, 'linking_filename', None) else ""))
     print(f"  Input CSV: {args.csv_path}")
     print(f"  Output file: {args.output_file}")
     print(f"  Log file: {args.log_file}")
@@ -938,7 +1330,12 @@ if __name__ == "__main__":
         use_history=bool(args.history_path),  # injection follows file presence (basesql semantics)
         use_cluster=args.cluster,
         dataset=args.dataset,
-        linking_filename=linking_filename,
+        linking_filename=getattr(args, 'linking_filename', None),
         limit=_limit,
         cluster_filter=args.cluster_filter,
+        cluster_path=args.mapping_path,
+        linking_source=args.linking_source,
+        view_sql_col_override=getattr(args, 'view_sql_col', None),
+        sql_col_override=None,  # MAC-SQL still constructs sql_col_name from prefix; only view_sql gets the JSON override for now
+        column_suffix=_macsql_suffix(args),
     )

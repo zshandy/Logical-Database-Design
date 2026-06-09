@@ -17,21 +17,31 @@ def get_database_schema(
 ) -> str:
     """Get the database schema via LangChain's ``SQLDatabase`` wrapper.
 
-    If ``table_name`` is a string or list, only those tables are returned.
+    If ``table_name`` is a string or list, only those tables are returned —
+    and reflection is restricted to that same allowlist. This matters when
+    the DB contains leftover views from prior ``prep_database`` runs that may
+    reference columns the current rename no longer exposes: without an
+    ``include_tables`` filter, ``MetaData.reflect()`` PRAGMAs every view and
+    crashes on the stale ones. We treat the caller-provided list (or, in
+    pipelines, the prep-JSON's active-view list) as the source of truth.
     """
+    if isinstance(table_name, str):
+        wanted = [table_name]
+    elif isinstance(table_name, list):
+        wanted = list(table_name)
+    else:
+        wanted = None
+
     db = SQLDatabase.from_uri(
         "sqlite:///" + DB_URI,
         sample_rows_in_table_info=sample_rows,
         view_support=include_views,
+        include_tables=wanted,
     )
 
-    if table_name is None:
+    if wanted is None:
         return db.get_table_info_no_throw()
-    if isinstance(table_name, str):
-        return db.get_table_info_no_throw(table_names=[table_name])
-    if isinstance(table_name, list):
-        return db.get_table_info_no_throw(table_names=table_name)
-    return db.get_table_info_no_throw()
+    return db.get_table_info_no_throw(table_names=wanted)
 
 
 def get_database_schema_manual(

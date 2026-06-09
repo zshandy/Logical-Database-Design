@@ -134,8 +134,11 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--mapping_path",
         default=None,
-        help="Path to the name-mapping JSON. Only used when --rename is set. "
-             "If omitted, auto-resolves to <LDD>/mapping_files/name_mapping_{dataset}.json.",
+        help="Path to the prep config JSON (produced by ``prep_database``). The file holds "
+             "the rename mapping AND the cluster artifacts in nested sections. Used whenever "
+             "--rename or --cluster is on. Loaders also accept legacy flat files "
+             "(``name_mapping_*.json``, ``cluster_*.json``). Default: auto-resolve to "
+             "``<LDD>/mapping_files/prep_{dataset}[_renamed].json``.",
     )
     p.add_argument(
         "--per_db",
@@ -150,19 +153,23 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
         help="Row selection. Either 'N' for the first N rows, or 'START:END' "
              "for a python-style half-open slice.",
     )
+    # --question_col / --sql_col default to None so the post-parse resolver
+    # can detect "user did not pass" and fall back to the mapping JSON's
+    # ``columns`` section (recorded by prep_database). Static fallback is the
+    # historical default ('question' / 'SQL') if neither CLI nor JSON specifies.
     p.add_argument(
         "--question_col",
-        default="question",
+        default=None,
         metavar="COLUMN",
-        help="Name of the input-CSV column holding the natural-language question. "
-             "Default: 'question'.",
+        help="Input-CSV column holding the natural-language question. If omitted, "
+             "auto-resolves from the mapping JSON's columns.question (default 'question').",
     )
     p.add_argument(
         "--sql_col",
-        default="SQL",
+        default=None,
         metavar="COLUMN",
-        help="Name of the input-CSV column holding the (optional) ground-truth SQL. "
-             "Default: 'SQL'. Pipelines that don't read gold SQL ignore this.",
+        help="Input-CSV column holding the (optional) ground-truth SQL. If omitted, "
+             "auto-resolves from the mapping JSON's columns.sql (default 'SQL').",
     )
 
 
@@ -204,6 +211,48 @@ def resolve_paths(args: argparse.Namespace, pipeline_tag: str = "pipeline") -> N
         print(f"[{pipeline_tag}] --history_path auto-resolved to {args.history_path}")
 
 
+def resolve_column_defaults(
+    args: argparse.Namespace,
+    mapping_path: Optional[str],
+    pipeline_tag: str = "pipeline",
+) -> None:
+    """Fill ``--question_col`` / ``--sql_col`` from the mapping JSON's ``columns``
+    section when the user did not pass them explicitly (i.e. they are ``None``).
+
+    Precedence: explicit CLI > mapping JSON > hardcoded default ('question' /
+    'SQL'). Mutates ``args`` in place. No-op when the JSON has no ``columns``
+    section (legacy files).
+
+    Pipelines should call this AFTER ``resolve_paths`` and ``resolve_mapping_path``.
+    Extra column attributes (e.g. ``hist_view_sql_col`` for view-aware rewrites)
+    are populated as ``args.hist_*`` so pipelines can pick them up without
+    re-implementing the JSON lookup.
+    """
+    cols: dict = {}
+    if mapping_path and os.path.exists(mapping_path):
+        try:
+            from _common.rename_mapping import load_active_columns
+            cols = load_active_columns(mapping_path)
+        except Exception as e:
+            print(f"[{pipeline_tag}] could not read columns section from {mapping_path}: {e}")
+            cols = {}
+
+    if getattr(args, "question_col", None) is None:
+        args.question_col = cols.get("question", "question")
+        if cols.get("question"):
+            print(f"[{pipeline_tag}] --question_col auto-resolved to {args.question_col!r} (from mapping JSON)")
+    if getattr(args, "sql_col", None) is None:
+        args.sql_col = cols.get("sql", "SQL")
+        if cols.get("sql"):
+            print(f"[{pipeline_tag}] --sql_col auto-resolved to {args.sql_col!r} (from mapping JSON)")
+
+    # Expose the gt_tables / view_sql columns as args so pipelines can read
+    # them without duplicating the JSON lookup. These have no CLI equivalent
+    # in cli_common today; pipelines that need them check for the attribute.
+    args.gt_tables_col = cols.get("gt_tables", "gt_renamed_tables" if getattr(args, "rename", False) else "gt_tables")
+    args.view_sql_col = cols.get("view_sql", "renamed_view_SQL" if getattr(args, "rename", False) else "view_SQL")
+
+
 def resolve_mapping_path(
     args: argparse.Namespace,
     pipeline_tag: str = "pipeline",
@@ -213,12 +262,15 @@ def resolve_mapping_path(
     If ``args.mapping_path`` is set, returns it; otherwise auto-resolves from
     ``--dataset`` and ``--sample``. Returns ``None`` if ``--rename`` is unset.
     """
-    if not getattr(args, "rename", False):
+    # mapping_path is needed when --rename OR --cluster is on (the consolidated
+    # prep_database config file holds both sections).
+    needs_mapping = getattr(args, "rename", False) or getattr(args, "cluster", False)
+    if not needs_mapping:
         return None
     if args.mapping_path:
         return args.mapping_path
     sample = getattr(args, "sample", 100)
-    path = default_mapping_path(args.dataset, sample)
+    path = default_mapping_path(args.dataset, sample, rename=getattr(args, "rename", False))
     print(f"[{pipeline_tag}] --mapping_path auto-resolved to {path}")
     args.mapping_path = path
     return path

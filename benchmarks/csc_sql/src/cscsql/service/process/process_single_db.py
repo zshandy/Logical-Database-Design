@@ -542,40 +542,56 @@ def obtain_db_details_simple(db_info, sampled_db_values_dict, relavant_db_values
     return "\n\n".join(db_details)
 
 
-def get_history_sql_cols(rename: bool = False, view: bool = False, dataset: str = "bird") -> List[str]:
-    """
-    Determine the SQL column name(s) in the history CSV based on flags.
-    Returns a list of columns to retrieve top-k from each.
+def get_history_sql_cols(
+    rename: bool = False,
+    view: bool = False,
+    dataset: str = "bird",
+    sql_col_override: str = None,
+    view_sql_col_override: str = None,
+) -> List[str]:
+    """Determine SQL column name(s) in the history CSV.
 
-    bird:
-    - No flags: ['SQL']
-    - --rename: ['workload_updated_SQL']
-    - --view: ['SQL', 'view_SQL']
-    - --rename --view: ['workload_updated_SQL', 'workload_updated_view_SQL']
+    When ``sql_col_override`` / ``view_sql_col_override`` are supplied (e.g.
+    by the CLI after ``resolve_column_defaults`` read them from the mapping
+    JSON's ``columns`` section), those win over the hardcoded defaults.
 
-    spider:
-    - No flags: ['SQL']
-    - --rename: ['renamed_SQL']
-    - --view: ['SQL', 'view_SQL']
-    - --rename --view: ['renamed_SQL', 'renamed_view_SQL']
+    Defaults (when no override):
+      bird:
+      - No flags: ['SQL']
+      - --rename: ['workload_updated_SQL']
+      - --view: ['SQL', 'view_SQL']
+      - --rename --view: ['workload_updated_SQL', 'workload_updated_view_SQL']
+
+      spider:
+      - No flags: ['SQL']
+      - --rename: ['renamed_SQL']
+      - --view: ['SQL', 'view_SQL']
+      - --rename --view: ['renamed_SQL', 'renamed_view_SQL']
     """
     if dataset == "spider":
-        base_col = 'renamed_SQL' if rename else 'SQL'
-        cols = [base_col]
-        if view:
-            view_col = 'renamed_view_SQL' if rename else 'view_SQL'
-            cols.append(view_col)
-        return cols
-    base_col = 'workload_updated_SQL' if rename else 'SQL'
-    cols = [base_col]
+        base_default = 'renamed_SQL' if rename else 'SQL'
+        view_default = 'renamed_view_SQL' if rename else 'view_SQL'
+    else:
+        base_default = 'workload_updated_SQL' if rename else 'SQL'
+        view_default = 'workload_updated_view_SQL' if rename else 'view_SQL'
+    cols = [sql_col_override or base_default]
     if view:
-        view_col = 'workload_updated_view_SQL' if rename else 'view_SQL'
-        cols.append(view_col)
+        cols.append(view_sql_col_override or view_default)
     return cols
 
 
-def get_gt_tables_col(rename: bool = False, dataset: str = "bird") -> str:
-    """Determine the ground-truth tables column for cluster building."""
+def get_gt_tables_col(
+    rename: bool = False,
+    dataset: str = "bird",
+    gt_tables_col_override: str = None,
+) -> str:
+    """Determine the ground-truth tables column for cluster building.
+
+    ``gt_tables_col_override`` (typically from the mapping JSON's
+    ``columns.gt_tables``) wins over the hardcoded default.
+    """
+    if gt_tables_col_override:
+        return gt_tables_col_override
     if dataset == "spider":
         return 'gt_renamed_tables' if rename else 'gt_tables'
     return 'gt_workload_updated_tables' if rename else 'gt_tables'
@@ -798,7 +814,9 @@ def find_all_clusters_for_tables(query_tables, clusters, sqlite_path=None):
 
 def precompute_history(history_path: str, output_dir: str, rename: bool = False,
                        view: bool = False, cluster: bool = False, db_path: str = None,
-                       dataset: str = "bird"):
+                       dataset: str = "bird", cluster_path: str = None,
+                       sql_col_override: str = None, view_sql_col_override: str = None,
+                       gt_tables_col_override: str = None):
     """
     Precompute history embeddings and optionally build clusters.
     Saves everything needed for retrieval at inference time.
@@ -809,7 +827,11 @@ def precompute_history(history_path: str, output_dir: str, rename: bool = False,
     import ast
 
     history_df = pd.read_csv(history_path)
-    sql_cols = get_history_sql_cols(rename, view, dataset=dataset)
+    sql_cols = get_history_sql_cols(
+        rename, view, dataset=dataset,
+        sql_col_override=sql_col_override,
+        view_sql_col_override=view_sql_col_override,
+    )
     print(f"History: {len(history_df)} entries, SQL columns: {sql_cols}")
 
     # Validate columns
@@ -844,37 +866,68 @@ def precompute_history(history_path: str, output_dir: str, rename: bool = False,
 
     # Build clusters if requested
     if cluster:
-        gt_col = get_gt_tables_col(rename, dataset=dataset)
-        base_sql_col = sql_cols[0]  # First entry is the base SQL column
-
-        if gt_col not in history_df.columns:
-            print(f"WARNING: cluster column '{gt_col}' not found. Skipping cluster building.")
-            return
-        if base_sql_col not in history_df.columns:
-            print(f"WARNING: SQL column '{base_sql_col}' not found. Skipping cluster building.")
-            return
-
-        # Build path list
-        path_list = []
-        for _, row in history_df.iterrows():
-            path_list.append(simplify_sql(str(row[base_sql_col])))
-
-        question_list = history_questions
-        t_list = [ast.literal_eval(str(x)) for x in history_df[gt_col].tolist()]
-
-        exact_clusters = find_exact_query_patterns(t_list, path_list, min_frequency=5, min_tables=2)
-        assign_queries_to_clusters(t_list, exact_clusters, question_list, path_list, min_tables=2)
-
-        print(f"Built {len(exact_clusters)} clusters")
-
-        # Save clusters (convert sets/non-serializable types)
         clusters_path = os.path.join(output_dir, "history_clusters.json")
-        # Clean combo_pairs keys (int -> str for JSON)
-        for c in exact_clusters:
-            c["combo_pairs"] = {str(k): v for k, v in c["combo_pairs"].items()}
-        with open(clusters_path, "w", encoding="utf-8") as f:
-            json.dump(exact_clusters, f, indent=2, ensure_ascii=False)
-        print(f"Saved clusters to {clusters_path}")
+
+        # Fast path: load precomputed clusters from --mapping_path (consolidated
+        # prep_database config). Shape sniffer handles consolidated, legacy
+        # cluster_*.json (flat), and raw list dumps.
+        loaded_from_file = False
+        if cluster_path and os.path.exists(cluster_path):
+            print(f"Loading precomputed clusters from {cluster_path}")
+            with open(cluster_path, encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, list):
+                exact_clusters = payload                                # raw list
+            elif isinstance(payload.get("cluster"), dict) and "exact_clusters" in payload["cluster"]:
+                exact_clusters = payload["cluster"]["exact_clusters"]   # consolidated
+            else:
+                exact_clusters = payload.get("exact_clusters", [])      # legacy flat
+            if exact_clusters:
+                print(f"Loaded {len(exact_clusters)} clusters")
+                for c in exact_clusters:
+                    if "combo_pairs" in c:
+                        c["combo_pairs"] = {str(k): v for k, v in c["combo_pairs"].items()}
+                with open(clusters_path, "w", encoding="utf-8") as f:
+                    json.dump(exact_clusters, f, indent=2, ensure_ascii=False)
+                print(f"Saved clusters to {clusters_path}")
+                loaded_from_file = True
+            else:
+                print(f"  (no cluster section in {cluster_path}; building from history)")
+        if not loaded_from_file:
+            # Original path: build from history
+            gt_col = get_gt_tables_col(
+                rename, dataset=dataset,
+                gt_tables_col_override=gt_tables_col_override,
+            )
+            base_sql_col = sql_cols[0]  # First entry is the base SQL column
+
+            if gt_col not in history_df.columns:
+                print(f"WARNING: cluster column '{gt_col}' not found. Skipping cluster building.")
+                return
+            if base_sql_col not in history_df.columns:
+                print(f"WARNING: SQL column '{base_sql_col}' not found. Skipping cluster building.")
+                return
+
+            # Build path list
+            path_list = []
+            for _, row in history_df.iterrows():
+                path_list.append(simplify_sql(str(row[base_sql_col])))
+
+            question_list = history_questions
+            t_list = [ast.literal_eval(str(x)) for x in history_df[gt_col].tolist()]
+
+            exact_clusters = find_exact_query_patterns(t_list, path_list, min_frequency=5, min_tables=2)
+            assign_queries_to_clusters(t_list, exact_clusters, question_list, path_list, min_tables=2)
+
+            print(f"Built {len(exact_clusters)} clusters")
+
+            # Save clusters (convert sets/non-serializable types)
+            # Clean combo_pairs keys (int -> str for JSON)
+            for c in exact_clusters:
+                c["combo_pairs"] = {str(k): v for k, v in c["combo_pairs"].items()}
+            with open(clusters_path, "w", encoding="utf-8") as f:
+                json.dump(exact_clusters, f, indent=2, ensure_ascii=False)
+            print(f"Saved clusters to {clusters_path}")
 
 
 def process_csv_to_prompts(csv_path: str, db_path: str, output_path: str,
@@ -882,8 +935,12 @@ def process_csv_to_prompts(csv_path: str, db_path: str, output_path: str,
                            rename: bool = False, view: bool = False,
                            test_rows: str = None, history_path: str = None,
                            history_k: int = 7, cluster: bool = False,
+                           cluster_path: str = None,
                            dataset_name: str = "bird",
-                           stage0_from: str = None):
+                           stage0_from: str = None,
+                           sql_col_override: str = None,
+                           view_sql_col_override: str = None,
+                           gt_tables_col_override: str = None):
     """
     Main preprocessing function.
 
@@ -916,11 +973,36 @@ def process_csv_to_prompts(csv_path: str, db_path: str, output_path: str,
         precompute_history(
             history_path=history_path, output_dir=output_dir,
             rename=rename, view=view, cluster=cluster, db_path=db_path,
-            dataset=dataset_name,
+            dataset=dataset_name, cluster_path=cluster_path,
+            sql_col_override=sql_col_override,
+            view_sql_col_override=view_sql_col_override,
+            gt_tables_col_override=gt_tables_col_override,
         )
 
-    # Build db_info from SQLite
-    db_info = get_db_info_from_sqlite(db_path, rename=rename, dataset=dataset_name)
+    # Build db_info from SQLite. Source the "allowed tables" list from the
+    # prep JSON when available — the hardcoded RENAMED_TABLES constant is the
+    # OLD CamelCase scheme (Bank_Accounts, ...) and doesn't match today's
+    # prep_database output (bank_account_dim, ...). Same JSON-as-source-of-truth
+    # treatment as basesql/din-sql/MAC-SQL.
+    _json_active_tables = None
+    if cluster_path and os.path.exists(cluster_path):
+        try:
+            import sys as _sys_at
+            _bench_root_at = os.path.abspath(os.path.join(
+                os.path.dirname(__file__), os.pardir, os.pardir, os.pardir, os.pardir
+            ))
+            if _bench_root_at not in _sys_at.path:
+                _sys_at.path.insert(0, _bench_root_at)
+            from _common.rename_mapping import load_active_views
+            _at, _ = load_active_views(cluster_path)
+            if _at:
+                _json_active_tables = _at
+                print(f"📋 --mapping_path: using {len(_at)} tables from {os.path.basename(cluster_path)}")
+        except Exception as _e:
+            print(f"Note: could not read tables from {cluster_path}: {_e}")
+    db_info = get_db_info_from_sqlite(
+        db_path, rename=rename, table_list=_json_active_tables, dataset=dataset_name,
+    )
     print(f"Loaded schema: {len(db_info['table_names_original'])} tables")
 
     # --- STAGE 0 PRE-PRUNING ---
@@ -971,10 +1053,23 @@ def process_csv_to_prompts(csv_path: str, db_path: str, output_path: str,
         db_path, db_info["table_names_original"], value_limit_num
     )
 
-    # Pre-generate view DDLs if --view is enabled
+    # Pre-generate view DDLs if --view is enabled. Source the cluster_views
+    # list from the prep JSON when available (same reason as the active-tables
+    # override above — the hardcoded RENAMED_TABLES_VIEWS constant is stale).
     view_ddls = {}
     if view:
-        view_list = get_view_list(rename, dataset=dataset_name)
+        view_list = None
+        if cluster_path and os.path.exists(cluster_path):
+            try:
+                from _common.rename_mapping import load_active_views as _lav
+                _, _jv = _lav(cluster_path)
+                if _jv:
+                    view_list = _jv
+                    print(f"📋 --mapping_path: using {len(_jv)} cluster_views from {os.path.basename(cluster_path)}")
+            except Exception as _e:
+                print(f"Note: could not read cluster_views from {cluster_path}: {_e}")
+        if view_list is None:
+            view_list = get_view_list(rename, dataset=dataset_name)
         print(f"Pre-generating DDLs for {len(view_list)} views...")
         view_db_info = get_db_info_from_sqlite(db_path, rename=rename, table_list=view_list, dataset=dataset_name)
         view_sampled_values = sample_table_values(

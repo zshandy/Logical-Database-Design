@@ -43,7 +43,7 @@ from _common.embeddings import (  # noqa: E402
     prepare_reference_embeddings,
     topk_embedding_cosine_sim,
 )
-from _common.history import build_clusters_from_history  # noqa: E402
+from _common.history import build_clusters_from_history, load_clusters_from_file  # noqa: E402
 from _common.llm import (  # noqa: E402
     chat_with_chatgpt,
     chat_with_gemini,
@@ -73,6 +73,7 @@ from .config import (  # noqa: E402
     default_cluster_filter,
     lookup_module_list,
     parse_args,
+    resolve_column_defaults,
     resolve_mapping_path,
     resolve_paths,
     resolve_rename_v_suffix,
@@ -105,7 +106,6 @@ class PipelineState:
     base_schema: str
 
     mapping_path: Optional[str]
-    org_keyed: bool
     rename_v_suffix: Optional[str]
 
     hist_sql_col: str
@@ -124,6 +124,7 @@ class PipelineState:
     per_db_warned: set = field(default_factory=set)
 
     log_dir: str = ""
+    output_dir: str = ""
     suffix: str = ""
     linking_col: str = ""
     sql_col: str = ""
@@ -137,7 +138,6 @@ def _build_base_schema(
     base_tables: List[str],
     *,
     rename: bool,
-    org_keyed: bool,
     mapping_path: Optional[str],
     ds_org_tables: List[str],
 ) -> str:
@@ -158,9 +158,7 @@ def _build_base_schema(
     ) + "\n\n"
 
     if rename and mapping_path:
-        fk_block = build_renamed_fk_block(
-            db_path, ds_org_tables, mapping_path, org_keyed_columns=org_keyed
-        )
+        fk_block = build_renamed_fk_block(db_path, ds_org_tables, mapping_path)
         if fk_block:
             base_schema += fk_block
             print(f"🔗 Injected {fk_block.count(chr(10)) - 2} renamed FK lines into base_schema")
@@ -170,12 +168,32 @@ def _build_base_schema(
     return base_schema
 
 
-def _history_column_names(rename: bool, rename_v_suffix: Optional[str]) -> Tuple[str, str, str]:
-    """Return ``(sql_col, view_sql_col, gt_tables_col)`` for the history sample CSV."""
+def _history_column_names(
+    rename: bool,
+    rename_v_suffix: Optional[str],
+    args: Optional[argparse.Namespace] = None,
+) -> Tuple[str, str, str]:
+    """Return ``(sql_col, view_sql_col, gt_tables_col)`` for the history sample CSV.
+
+    When ``args`` is supplied and ``resolve_column_defaults`` has already run
+    (i.e. ``args.view_sql_col`` / ``args.gt_tables_col`` are set), those values
+    win over the hardcoded defaults so that custom column names recorded in
+    the mapping JSON's ``columns`` section flow through. Explicit CLI flags
+    already win over the JSON (handled inside ``resolve_column_defaults``).
+    """
     if rename:
         tail = f"_{rename_v_suffix}" if rename_v_suffix else ""
-        return f"renamed_SQL{tail}", f"renamed_view_SQL{tail}", f"gt_renamed_tables{tail}"
-    return "SQL", "view_SQL", "gt_tables"
+        sql_default = f"renamed_SQL{tail}"
+        view_sql_default = f"renamed_view_SQL{tail}"
+        gt_default = f"gt_renamed_tables{tail}"
+    else:
+        sql_default, view_sql_default, gt_default = "SQL", "view_SQL", "gt_tables"
+    if args is not None:
+        sql_col = getattr(args, "sql_col", None) or sql_default
+        view_sql_col = getattr(args, "view_sql_col", None) or view_sql_default
+        gt_tables_col = getattr(args, "gt_tables_col", None) or gt_default
+        return sql_col, view_sql_col, gt_tables_col
+    return sql_default, view_sql_default, gt_default
 
 
 def _build_suffix(args: argparse.Namespace, is_gemini: bool,
@@ -261,22 +279,46 @@ def setup(args: argparse.Namespace, df: pd.DataFrame) -> PipelineState:
         if "db_id" not in df.columns:
             raise SystemExit("--per_db requires a 'db_id' column in the input CSV.")
 
-    org_keyed = (args.dataset == "bird")
-    mapping_path = resolve_mapping_path(args, "basesql") if args.rename else None
-    if args.rename and mapping_path and not os.path.exists(mapping_path):
+    # resolve_mapping_path returns None when neither --rename nor --cluster is
+    # set; otherwise it auto-resolves to the standard location (or honors the
+    # user's --mapping_path). We always call it so that --cluster --view runs
+    # without --rename can still load the prep JSON's columns/tables section.
+    mapping_path = resolve_mapping_path(args, "basesql")
+    if mapping_path and not os.path.exists(mapping_path):
         raise SystemExit(
-            f"--rename needs a mapping file but {mapping_path} does not exist. "
+            f"mapping file {mapping_path} does not exist. "
             f"Pass --mapping_path explicitly."
         )
 
+    # Fill --question_col / --sql_col (and gt_tables_col / view_sql_col attrs)
+    # from the mapping JSON's 'columns' section when the user did not pass them.
+    resolve_column_defaults(args, mapping_path, pipeline_tag="basesql")
+
+    # JSON-as-source-of-truth: when a mapping file is supplied, its top-level
+    # ``tables`` + ``view.cluster_views`` drive the active table/view lists.
+    # Applies regardless of --rename — the JSON's ``tables`` is the original
+    # base names when --rename was off at prep time, and the renamed-view names
+    # when --rename was on. The hardcoded DATASET_TABLES constants pre-date
+    # current prep runs and would point at stale view names either way.
+    # Explicit --rename_v / --view_v (applied above) still win over the JSON.
+    if mapping_path and os.path.exists(mapping_path):
+        from _common.rename_mapping import load_active_views
+        json_tables, json_views = load_active_views(mapping_path)
+        if json_tables and not args.rename_v:
+            print(f"📋 --mapping_path: using {len(json_tables)} tables from {os.path.basename(mapping_path)}")
+            base_tables = json_tables
+        if json_views and not args.view_v:
+            print(f"📋 --mapping_path: using {len(json_views)} cluster_views from {os.path.basename(mapping_path)}")
+            extra_views_pool = json_views
+
     base_schema = _build_base_schema(
         args.db_path, list(base_tables),
-        rename=args.rename, org_keyed=org_keyed,
+        rename=args.rename,
         mapping_path=mapping_path, ds_org_tables=list(ds_org_tables),
     )
 
     hist_sql_col, hist_view_sql_col, hist_gt_tables_col = _history_column_names(
-        args.rename, rename_v_suffix
+        args.rename, rename_v_suffix, args=args,
     )
 
     state = PipelineState(
@@ -289,7 +331,6 @@ def setup(args: argparse.Namespace, df: pd.DataFrame) -> PipelineState:
         extra_views_pool=list(extra_views_pool),
         base_schema=base_schema,
         mapping_path=mapping_path,
-        org_keyed=org_keyed,
         rename_v_suffix=rename_v_suffix,
         hist_sql_col=hist_sql_col,
         hist_view_sql_col=hist_view_sql_col,
@@ -297,12 +338,24 @@ def setup(args: argparse.Namespace, df: pd.DataFrame) -> PipelineState:
     )
 
     if args.history_path:
-        sample, exact_clusters, question_cluster_map = build_clusters_from_history(
-            args.history_path,
-            sql_col=hist_sql_col,
-            gt_tables_col=hist_gt_tables_col,
-            sample_pct=args.sample,
-        )
+        # Try loading precomputed clusters from the prep config; if the file
+        # doesn't have a cluster section, fall back to building from history.
+        loaded = False
+        if args.mapping_path and os.path.exists(args.mapping_path):
+            try:
+                sample, exact_clusters, question_cluster_map = load_clusters_from_file(
+                    args.mapping_path, args.history_path, sample_pct=args.sample,
+                )
+                loaded = True
+            except KeyError:
+                pass  # no cluster section — build below
+        if not loaded:
+            sample, exact_clusters, question_cluster_map = build_clusters_from_history(
+                args.history_path,
+                sql_col=hist_sql_col,
+                gt_tables_col=hist_gt_tables_col,
+                sample_pct=args.sample,
+            )
         print("🧠 Loading BGE encoder and building reference embeddings from history...")
         ensure_bge_model()
         ref_texts, ref_embs = prepare_reference_embeddings(list(sample["question"]))
@@ -314,7 +367,7 @@ def setup(args: argparse.Namespace, df: pd.DataFrame) -> PipelineState:
 
     if args.per_db:
         if args.rename:
-            table_to_view, _ = load_rename_mapping(mapping_path, org_keyed_columns=org_keyed)
+            table_to_view, _ = load_rename_mapping(mapping_path)
             for db_id, tables in state.ds_db_dict.items():
                 mapped = []
                 for t in tables:
@@ -333,16 +386,21 @@ def setup(args: argparse.Namespace, df: pd.DataFrame) -> PipelineState:
 
     suffix = _build_suffix(args, is_gemini, rename_v_suffix, view_v_suffix)
     run_id = time.strftime("%Y%m%d-%H%M%S")
-    log_base = f"logs_{args.dataset}" if args.dataset != "spider" else "logs"
-    log_dir = os.path.join(log_base, f"run_{run_id}{suffix}")
+    from _common.paths import default_log_dir, default_output_dir
+    run_sub = os.path.join(args.dataset, f"run_{run_id}{suffix}")
+    log_dir = default_log_dir("basesql", run_sub)
+    output_dir = default_output_dir("basesql", run_sub)
     os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     print(f"📂 Logging prompts to: {log_dir}")
+    print(f"📂 Writing outputs to: {output_dir}")
 
     state.suffix = suffix
     state.log_dir = log_dir
-    state.linking_col = f"linking{suffix}"
-    state.sql_col = f"sql{suffix}"
-    state.revised_sql_col = f"revised_sql{suffix}"
+    state.output_dir = output_dir
+    state.linking_col = f"basesql_linking{suffix}"
+    state.sql_col = f"basesql_sql{suffix}"
+    state.revised_sql_col = f"basesql_revised_sql{suffix}"
 
     return state
 
@@ -384,7 +442,6 @@ def _resolve_per_db(state: PipelineState, db_id: Optional[str]):
     if args.rename and state.mapping_path:
         fk = build_renamed_fk_block(
             state.db_path, state.ds_db_dict[db_id], state.mapping_path,
-            org_keyed_columns=state.org_keyed,
         )
         if fk:
             bs += fk
@@ -447,7 +504,7 @@ def _run_stage0_adhoc_view(
     fk_conds = find_fk_conditions_for_view_adhoc(
         state.db_path, stage0_tables,
         rename_mode=args.rename, mapping_path=state.mapping_path,
-        ds_org_tables=state.ds_org_tables, org_keyed=state.org_keyed,
+        ds_org_tables=state.ds_org_tables,
     )
     if not fk_conds:
         print(f"[adhoc view] q{int(index):04d}: ⚠️  no FKs among "
@@ -605,17 +662,23 @@ def _build_updated_schema(
             for t in cluster_tables_oc
         ) + "\n\n"
 
-        fk_lines = find_fk_conditions_for_view_adhoc(
-            state.db_path, cluster_tables_oc,
-            rename_mode=args.rename, mapping_path=state.mapping_path,
-            ds_org_tables=state.ds_org_tables, org_keyed=state.org_keyed,
-        )
-        if fk_lines:
-            effective_base += (
-                "Foreign Keys:\n"
-                + "\n".join(fk.replace("=", " = ") for fk in fk_lines)
-                + "\n\n"
+        # FK block is only useful when --rename is on — in that case the views
+        # don't carry FK constraints so we re-emit them in the renamed namespace.
+        # Without --rename, the schema DDLs above already include the FOREIGN KEY
+        # declarations (PRAGMA-derived), so an extra "Foreign Keys:" block would
+        # just duplicate that info in the prompt.
+        if args.rename:
+            fk_lines = find_fk_conditions_for_view_adhoc(
+                state.db_path, cluster_tables_oc,
+                rename_mode=args.rename, mapping_path=state.mapping_path,
+                ds_org_tables=state.ds_org_tables,
             )
+            if fk_lines:
+                effective_base += (
+                    "Foreign Keys:\n"
+                    + "\n".join(fk.replace("=", " = ") for fk in fk_lines)
+                    + "\n\n"
+                )
         apply_cluster_filter = True
 
     if args.view_adhoc:
@@ -887,7 +950,7 @@ def run_question(
                 fk_lines = find_fk_conditions_for_view_adhoc(
                     state.db_path, cluster_tables_oc,
                     rename_mode=args.rename, mapping_path=state.mapping_path,
-                    ds_org_tables=state.ds_org_tables, org_keyed=state.org_keyed,
+                    ds_org_tables=state.ds_org_tables,
                 )
                 append_log(state.log_dir, index,
                            "CLUSTER FILTER: restricted schema to cluster tables",
@@ -965,14 +1028,27 @@ def run(argv: Optional[list] = None) -> None:
         run_question(state, df, index, row, adhoc_view_cache)
         if (i + 1) % 100 == 0:
             inc_path = os.path.join(
-                state.log_dir,
+                state.output_dir,
                 f"{os.path.splitext(os.path.basename(args.csv_path))[0]}{state.suffix}_out.csv",
             )
             df.to_csv(inc_path, index=False)
             print(f"💾 Incremental save at row {index}")
 
     base_name = os.path.splitext(os.path.basename(args.csv_path))[0]
-    out_path = os.path.join(state.log_dir, f"{base_name}{state.suffix}_out.csv")
+    out_path = os.path.join(state.output_dir, f"{base_name}{state.suffix}_out.csv")
     df.to_csv(out_path, index=False)
-    print(f"💾 Saved results to: {out_path}")
+    print(f"💾 Saved per-run audit copy to: {out_path}")
     print(f"Failed indices: {state.failed_idx}")
+
+    # Write predictions back to the input CSV so multiple runs accumulate
+    # side-by-side, then compute EX for the final SQL column.
+    from _common.evaluate import write_back_to_input_csv
+    write_back_to_input_csv(
+        csv_path=args.csv_path,
+        df_predicted=df,
+        column_names=[state.linking_col, state.sql_col, state.revised_sql_col],
+        final_sql_col=state.revised_sql_col,
+        db_path=args.db_path,
+        gold_sql_col="SQL",
+        pipeline_tag="basesql",
+    )
