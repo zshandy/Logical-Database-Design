@@ -46,30 +46,121 @@ The four pipeline folders share the data folders above via relative
 
 ---
 
-## Setup
+## Quick start
 
-### Environment variables
+End-to-end walkthrough to get from "fresh clone" to "running the pipeline
+with all augmentations on". For the per-flag reference, see
+[Common CLI flags](#common-cli-flags) and the per-pipeline sections below.
 
-| Variable | Required by | Purpose |
-|----------|-------------|---------|
-| `OPENAI_API_KEY` | basesql, din-sql, MAC-SQL | OpenAI chat completions |
-| `GEMINI_API_KEY` | basesql, din-sql | Google GenAI (only when `--model` starts with `gemini`) |
+### Step 1 — Prepare your inputs
 
-No keys are embedded in the code; everything is loaded via `os.environ.get`.
+Drop three files into the LDD root. Defaults assume `<dataset>` is `bird` or
+`spider`; pass `--db_path` / `--csv_path` / `--history_path` to point
+elsewhere.
 
-### Python deps
+**(a) A merged SQLite database** at `databases/merged_<dataset>.sqlite`.
 
-Per-pipeline dependencies are declared in each folder's `requirements.txt` (or
-`pyproject.toml` for csc_sql). The shared `_common/` package depends on:
-`pandas`, `numpy`, `scikit-learn`, `sqlite3` (stdlib), `langchain`,
-`openai`, `func_timeout`, and `sentence-transformers` (only loaded when
-`--history` is on).
+A single `.sqlite` file containing the base tables of **every source database
+you want covered**, merged side by side into one file. Tables from different
+source DBs just live in the same `.sqlite` — no namespacing required. The
+prep step (and downstream baselines) use naming + workload signals to figure
+out which tables came from which source. The file is gitignored; bring your
+own.
 
-### Data files
+**(b) A benchmark CSV** at `csvs/nl2sql_<dataset>.csv`.
 
-Drop your SQLite files into [databases/](../databases/) (gitignored). The
-default file names are `merged_spider.sqlite` and `merged_bird.sqlite`; pass
-`--db_path` to point elsewhere.
+Required columns (defaults; override with `--question_col` / `--sql_col`):
+
+| Column | Default name | Purpose |
+|--------|--------------|---------|
+| Question | `question` | NL question to answer. |
+| Gold SQL | `SQL` | Ground-truth SQL. Used only for EX accuracy / verification — predicted SQLs are produced either way. |
+| (optional) DB tag | `db_id` | Source-DB id, used only by `--per_db` mode. |
+
+**(c) A history CSV** at `csvs/sample_<dataset>.csv` (recommended).
+
+Same shape as the benchmark CSV (`question` + `SQL` columns). This is the
+workload that `prep_database.py` mines for table co-occurrence patterns and
+that the baselines retrieve top-K similar SQLs from at inference time. If you
+don't have a separate workload file, you can point `--history_path` at your
+training-split CSV.
+
+### Step 2 — Install dependencies
+
+```bash
+pip install -r benchmarks/requirements.txt
+```
+
+Then set the LLM API key for the model you'll use:
+
+```bash
+export OPENAI_API_KEY=sk-...      # default; required for gpt-* models
+export GEMINI_API_KEY=...          # only when --model starts with 'gemini'
+```
+
+No keys are embedded in the code; everything is read via `os.environ.get`.
+
+### Step 3 — Run `prep_database.py` once
+
+`prep_database.py` is the schema-prep step. Given the merged sqlite + history
+CSV from Step 1, it produces a single consolidated JSON
+(`mapping_files/prep_<dataset>[_renamed].json`) holding the rename mapping,
+the table-set clusters, and the cluster-view definitions. Every baseline
+loads this JSON directly — you don't have to rerun prep_database per
+baseline.
+
+See **[PREP_DATABASE.md](PREP_DATABASE.md)** for the full phase-by-phase
+walkthrough and the complete flag reference. The recommended command for
+full-augmentation use is:
+
+```bash
+cd benchmarks
+python prep_database.py \
+    --db_path ../databases/merged_bird.sqlite \
+    --history_path ../csvs/sample_bird.csv \
+    --rename --cluster --view
+```
+
+This is a one-time cost per (database, history) pair. The history CSV is
+rewritten in place with new columns (`renamed_SQL`, `renamed_view_SQL`, ...)
+and a timestamped backup. Cached prompts + raw LLM responses land under
+`outputs/prep_database/<timestamp>/` for auditing.
+
+### Step 4 — Run a pipeline with full augmentation
+
+Full augmentation = `--rename --view --history --cluster`. The flag set is
+shared across all four pipelines; the only thing that changes between them
+is which folder you `cd` into.
+
+```bash
+cd benchmarks/basesql
+python basesql.py --dataset bird --rename --view --history --cluster
+```
+
+For the other three baselines:
+
+```bash
+# DIN-SQL
+cd benchmarks/din-sql
+python dinsql.py --dataset bird --rename --view --history --cluster
+
+# MAC-SQL (writes JSONL, needs --output_file)
+cd benchmarks/MAC-SQL
+python run_union.py --dataset bird --rename --view --history --cluster \
+                    --output_file outputs/bird_run.jsonl
+
+# CSC-SQL (local vLLM by default; pick checkpoints for each stage)
+cd benchmarks/csc_sql
+python run_single_db.py --dataset bird --rename --view --history --cluster \
+                        --model_table_link   <checkpoint> \
+                        --model_sql_generate <checkpoint> \
+                        --model_sql_merge    <checkpoint>
+```
+
+Add `--rows 50` for a quick smoke test over the first 50 questions, or
+`--rows 100:150` for a slice. CSC-SQL's pipeline-specific flags (vLLM,
+remote API mode, sampling counts) are documented in
+[CSC-SQL section](#csc_sql) below.
 
 ---
 
@@ -149,12 +240,7 @@ schema-restriction and history retrieval.
 | Flag | Type | Default | Purpose |
 |------|------|---------|---------|
 | `--cluster` | bool | off | Match each question to overlapping clusters; inject their common join paths into stage 2/3 prompts. Restricts top-K history retrieval to cluster questions. Requires `--history_path`. |
-| `--cluster_filter` | bool | **on when `--cluster` is set** | Restrict the stage-2/3 schema to only the union of cluster tables. Pass `--no-cluster_filter` to inject join paths *without* schema restriction. Has no effect when `--cluster` is off. |
-
-**Note:** As of this revision, `--cluster_filter` defaults to **ON** whenever
-`--cluster` is set — that's the configuration that consistently helps. Use
-`--no-cluster_filter` only when you specifically want to A/B test the
-filter's contribution.
+| `--cluster_filter` | bool | on when `--cluster` is set | Restrict the stage-2/3 schema to only the union of cluster tables. See [Notes](#notes) at the bottom for the default-on behaviour. |
 
 ### Per-database mode (`--per_db`)
 
@@ -164,26 +250,10 @@ filter's contribution.
 
 ---
 
-## Examples
+## More examples
 
-### Quick spider run, no schema augmentation
-
-```powershell
-$env:OPENAI_API_KEY = "sk-..."
-cd Logical-Database-Design\benchmarks\basesql
-python basesql.py --dataset spider --model gpt-4.1-mini --rows 50
-```
-
-### Full pipeline with all augmentations on bird
-
-```bash
-export OPENAI_API_KEY=sk-...
-cd Logical-Database-Design/benchmarks/basesql
-python basesql.py --dataset bird --rename --view --history --cluster
-```
-
-`--cluster_filter` is on by default (because `--cluster` is set); use
-`--no-cluster_filter` to disable it.
+Beyond the Quick Start above, these illustrate specific flag combinations
+worth knowing about.
 
 ### DIN-SQL with a pre-computed linking column (skip stage 1)
 
@@ -217,24 +287,10 @@ python run_single_db.py \
     --model_sql_merge     Qwen2.5-Coder-7B \
     --api_base_generate   http://192.168.1.100:8000/v1 \
     --api_base_merge      http://192.168.1.100:8001/v1 \
-    --history --cluster
+    --rename --view --history --cluster
 ```
 
-### MAC-SQL on bird with cluster mode and rename
-
-```bash
-cd Logical-Database-Design/benchmarks/MAC-SQL
-python run_union.py \
-    --dataset bird \
-    --output_file outputs/bird_run.jsonl \
-    --rename --view --cluster --history
-```
-
-`--cluster_filter` is implied by `--cluster`; pass `--no-cluster_filter` to
-opt out. `--csv_path` and `--history_path` auto-resolve to
-`../../csvs/nl2sql_bird.csv` and `../../csvs/sample_bird.csv`.
-
-### Sub-sampled history (--sample 50)
+### Sub-sampled history (`--sample 50`)
 
 ```bash
 python basesql.py --dataset bird --rename --history --sample 50 --cluster
@@ -459,8 +515,21 @@ The flags below are MAC-SQL-specific:
 
 ---
 
+## Notes
+
+**`--cluster_filter` defaults to ON whenever `--cluster` is set.** That's the
+configuration that consistently helps — `--cluster` injects join-path hints,
+and `--cluster_filter` additionally restricts the stage-2/3 schema to only
+the union of cluster tables. To A/B test the filter's contribution in
+isolation (i.e. inject cluster join paths without schema restriction), pass
+`--no-cluster_filter` alongside `--cluster`. The flag has no effect when
+`--cluster` is off.
+
+---
+
 ## See also
 
+- [PREP_DATABASE.md](PREP_DATABASE.md) — full walkthrough for the schema-prep step (rename + clusters + cluster views)
 - [`_common/cli_common.py`](_common/cli_common.py) — shared argparse + path resolvers
 - [`_common/datasets.py`](_common/datasets.py) — all static table/view lists
 - [`_common/clusters.py`](_common/clusters.py) — frequent-pattern clustering
