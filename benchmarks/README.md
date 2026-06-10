@@ -128,9 +128,11 @@ and a timestamped backup. Cached prompts + raw LLM responses land under
 
 ### Step 4 — Run a pipeline with full augmentation
 
-Full augmentation = `--rename --view --history --cluster`. The flag set is
-shared across all four pipelines; the only thing that changes between them
-is which folder you `cd` into.
+Full augmentation = `--rename --view --history --cluster` — the paper's
+three schema transformations (Schema Renaming + Schema Abstraction + Schema
+Partitioning) layered on top of history-driven top-K retrieval. The flag set
+is shared across all four pipelines; the only thing that changes between
+them is which folder you `cd` into.
 
 ```bash
 cd benchmarks/basesql
@@ -177,6 +179,15 @@ The shared definition for basesql + din-sql lives in
 [`_common/cli_common.py`](_common/cli_common.py); csc_sql and MAC-SQL repeat
 the same names with the same semantics in their own argparse blocks.
 
+The three schema-transformation flags map directly to the three
+transformations introduced in [the paper](../README.md):
+
+| Flag | Paper name | What it does |
+|------|------------|--------------|
+| `--rename` | **Schema Renaming** | Switch to LLM-renamed tables/columns to resolve lexical ambiguity. |
+| `--view` | **Schema Abstraction** | Inject pre-computed multi-table views so the model bypasses complex joins. |
+| `--cluster` | **Schema Partitioning** | Prune the prompt schema to a workload-mined, question-relevant partition. |
+
 | Flag | Type | Default | Purpose |
 |------|------|---------|---------|
 | `--dataset` | choice | `spider` | One of `spider`, `bird`. Drives default paths, table/view lists, and log folder. |
@@ -206,11 +217,13 @@ for top-K SQL retrieval during stages 2/3.
 | `--history_path` | str | auto | Path to history CSV; implies `--history`. |
 | `--sample` | int 1..100 | 100 | Percent of history rows to use. `<100` triggers a reproducible random sub-sample (seed=42) **and** auto-maps `_{N}` variants for bird/spider — see Auto-resolution below. |
 
-### Rename mode (`--rename`)
+### Schema renaming (`--rename`)
 
 Switches base tables from `org_tables` to `renamed_tables` (which are
 materialized as views in the merged sqlite). Triggers a translated FK block
-in the prompt schema.
+in the prompt schema. Mitigates *lexical ambiguity* failures — e.g.
+`molecule.label` carrying carcinogenicity values, which the model misses
+because nothing in the identifier hints at the semantics.
 
 | Flag | Type | Default | Purpose |
 |------|------|---------|---------|
@@ -218,10 +231,12 @@ in the prompt schema.
 | `--rename_v` | str | auto | Override the renamed-tables list by module-variable name, e.g. `bird_renamed_tables_50`. Requires `--rename`. |
 | `--mapping_path` | str | auto | Path to the name-mapping JSON. Defaults to `../../mapping_files/name_mapping_{dataset}.json`. Only used with `--rename`. |
 
-### View mode (`--view`)
+### Schema abstraction (`--view`)
 
 Per question, retrieves matching views from the pool by parsing stage-1
-linked tables → view names. Two variants build views on demand:
+linked tables → view names. Mitigates *incomplete join path* failures by
+giving the model a pre-computed multi-table view to draw from instead of
+forcing it to infer the join. Two variants build views on demand:
 
 | Flag | Type | Default | Purpose |
 |------|------|---------|---------|
@@ -231,11 +246,13 @@ linked tables → view names. Two variants build views on demand:
 | `--view_relink` | bool | off | Matches pre-defined views to stage-0 linked tables, injects them into stage 1, re-runs stage 1. Requires `--view` + `--use_linking`; mutually exclusive with `--view_adhoc`. |
 | `--use_linking COLUMN` | str | none | CSV column name that already contains schema links. Skips stage-1 linking and uses this column directly. |
 
-### Cluster mode (`--cluster`)
+### Schema partitioning (`--cluster`)
 
 Builds frequent table-set clusters from the history CSV (via
-[`_common/clusters.py`](_common/clusters.py)) and uses them for both
-schema-restriction and history retrieval.
+[`_common/clusters.py`](_common/clusters.py)) and uses them as workload-mined
+partitions for both schema-restriction and history retrieval. Mitigates
+*over-joining* failures by pruning tables outside the question's relevant
+partition from the prompt schema.
 
 | Flag | Type | Default | Purpose |
 |------|------|---------|---------|
