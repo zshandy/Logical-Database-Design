@@ -39,7 +39,3 @@ schema-prep script live under [`benchmarks/`](benchmarks/):
 
 - [`benchmarks/README.md`](benchmarks/README.md) — 4-step quick start + flag reference for all four pipelines
 - [`benchmarks/PREP_DATABASE.md`](benchmarks/PREP_DATABASE.md) — schema-prep walkthrough (rename + cluster + view artifacts)
-
-## Results
-
-Result are available at https://drive.google.com/drive/folders/1FmzbgjPhJ-LERxrDGUOCNUooAiXSLOoL?usp=drive_link
