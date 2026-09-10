@@ -9,6 +9,8 @@ from typing import Any, Dict, Tuple, Union
 
 from func_timeout import FunctionTimedOut, func_set_timeout
 
+from . import db_backend
+
 
 @func_set_timeout(60)
 def execute_sql(cursor, sql: str):
@@ -27,6 +29,15 @@ def compare_sql(
     Returns ``(match, predicted_res, ground_truth_res)`` where ``match`` is 1 if
     the result sets are equal, 0 otherwise (including on error/timeout).
     """
+    if db_backend.is_mysql(db_path):
+        ground_truth_res = db_backend.execute(db_path, ground_truth)
+        try:
+            predicted_res = db_backend.execute(db_path, predicted_sql)
+        except Exception:
+            return 0, None, ground_truth_res
+        res = 1 if set(predicted_res) == set(ground_truth_res) else 0
+        return res, predicted_res, ground_truth_res
+
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.text_factory = bytes
     cursor = conn.cursor()
@@ -46,6 +57,16 @@ def compare_sql(
 @func_set_timeout(15)
 def val_execute_sql(db_path: str, sql: str, fetch: Union[str, int] = "all") -> Any:
     """Execute a SQL query and fetch results. ``fetch`` ∈ ``{"all","one","random",<int>}``."""
+    if db_backend.is_mysql(db_path):
+        try:
+            if fetch == "random":
+                samples = db_backend.execute(db_path, sql, fetch=10, timeout=15)
+                return random.choice(samples) if samples else []
+            return db_backend.execute(db_path, sql, fetch=fetch, timeout=15)
+        except Exception as e:
+            logging.error(f"Error in execute_sql: {e}\nSQL: {sql}")
+            raise
+
     try:
         with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()

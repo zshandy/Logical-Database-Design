@@ -42,6 +42,24 @@ def compare_sql(
     0 otherwise (including when either query raises or times out at 15s).
     Verbose mode prints a diagnostic when prediction differs from gold.
     """
+    from . import db_backend
+    if db_backend.is_mysql(db_path):
+        try:
+            ground_truth_res = db_backend.execute(db_path, ground_truth, timeout=15)
+        except Exception:
+            return 0, None, []
+        try:
+            predicted_res = db_backend.execute(db_path, predicted_sql, timeout=15)
+        except Exception as e:
+            if verbose:
+                print(f"{index}\n  predicted sql: {predicted_sql}\n  ground truth: {ground_truth}\n  raises an error: {e}.\n  --------------------")
+            return 0, None, ground_truth_res
+        if set(predicted_res) == set(ground_truth_res):
+            return 1, predicted_res, ground_truth_res
+        if verbose:
+            print(f"{index}\n  predicted sql: {predicted_sql}\n  ground truth: {ground_truth}\n  set mismatch\n  --------------------")
+        return 0, predicted_res, ground_truth_res
+
     conn = None
     ground_truth_res: list = []
     try:

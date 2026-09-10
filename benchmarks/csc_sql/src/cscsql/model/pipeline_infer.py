@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 
 from cscsql.utils.file_utils import FileUtils
@@ -92,7 +93,13 @@ def run_eval_by_cmd(opt, eval_mode="greedy_search", eval_step=None):
         if getattr(opt, 'view_sql_col', None):
             history_arg += f" --view_sql_col '{opt.view_sql_col}'"
 
-    greedy_search_cmd = f"CUDA_VISIBLE_DEVICES={opt.visible_devices} python3 -m cscsql.model.infer  \
+    # sys.executable, not a bare `python3`: this stage runs as a subprocess, and
+    # a bare name resolves against PATH. That silently picks the system
+    # interpreter whenever this env's python was invoked by absolute path rather
+    # than activated, and the child then dies with
+    # "No module named 'cscsql'" -- while os.system below discards the exit
+    # code, so the wrapper reports success and produces no SQL.
+    greedy_search_cmd = f"CUDA_VISIBLE_DEVICES={opt.visible_devices} {sys.executable} -m cscsql.model.infer  \
         --pretrained_model_name_or_path '{pretrained_model_name_or_path}' \
         --input_file '{opt.input_file}' \
         --output_file '{gs_pred_file}' \
@@ -117,7 +124,14 @@ def run_eval_by_cmd(opt, eval_mode="greedy_search", eval_step=None):
         {view_arg} \
         {history_arg} \
         --test_offset {getattr(opt, 'test_offset', 0)}"
-    os.system(greedy_search_cmd)
+    rc = os.system(greedy_search_cmd)
+    if rc != 0:
+        # Surface it. Previously the exit code was dropped, so an inference
+        # stage that never started still looked like a completed run and only
+        # showed up much later as "No voting result files found".
+        print(f"ERROR: inference subprocess for step {eval_step} exited {rc}; "
+              f"no predictions were produced. Command:\n{greedy_search_cmd}",
+              file=sys.stderr)
 
     vote_file = gs_pred_file[:-5] + "_pred_major_voting_sqls.sql"
     print(f"finish infer step {eval_step} - {use_model}, result file: {vote_file}")

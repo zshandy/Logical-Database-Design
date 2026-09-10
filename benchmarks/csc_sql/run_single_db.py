@@ -13,6 +13,7 @@ CSV must have columns: question, db_id, SQL
 (db_id is kept for compatibility but ignored — all queries run against the single DB)
 """
 import os
+import sys
 import argparse
 
 from cscsql.utils.time_utils import TimeUtils
@@ -343,7 +344,7 @@ def main():
         os.makedirs(prepass_log_dir, exist_ok=True)
         prepass_cmd = (
             f"CUDA_VISIBLE_DEVICES={args.visible_devices} "
-            f"python -m cscsql.model.pipeline_infer "
+            f"{sys.executable} -m cscsql.model.pipeline_infer "
             f"--model_table_link '{model_table_link}' "
             f"--model_sql_generate '{args.model_sql_generate}' "
             f"--model_sql_merge '{args.model_sql_merge}' "
@@ -373,7 +374,13 @@ def main():
         if args.max_model_len is not None:
             prepass_cmd += f" --max_model_len {args.max_model_len}"
         print(f"Running pre-pass: {prepass_cmd}")
-        os.system(prepass_cmd)
+        _rc = os.system(prepass_cmd)
+    if _rc != 0:
+        # Previously the exit code was discarded, so a subprocess that
+        # never started (e.g. `python` absent from PATH) still let the
+        # run report success and produce no SQL.
+        print(f"ERROR: stage-1 pre-pass exited {_rc}; no predictions were "
+              f"produced.", file=sys.stderr)
 
         # Use pre-pass output as stage0_from for the main pipeline.
         prepass_stage1_file = os.path.join(prepass_run_dir, "sampling_think_table_link.json")
@@ -413,7 +420,7 @@ def main():
     # Note: we use --source single_db and pass --db_path as the .sqlite file
     pipeline_cmd = (
         f"CUDA_VISIBLE_DEVICES={args.visible_devices} "
-        f"python -m cscsql.model.pipeline_infer "
+        f"{sys.executable} -m cscsql.model.pipeline_infer "
         f"--model_table_link '{model_table_link}' "
         f"--model_sql_generate '{args.model_sql_generate}' "
         f"--model_sql_merge '{args.model_sql_merge}' "
@@ -484,7 +491,13 @@ def main():
         pipeline_cmd += f" --test_offset {test_offset}"
 
     print(f"Running: {pipeline_cmd}")
-    os.system(pipeline_cmd)
+    _rc = os.system(pipeline_cmd)
+    if _rc != 0:
+        # Previously the exit code was discarded, so a subprocess that
+        # never started (e.g. `python` absent from PATH) still let the
+        # run report success and produce no SQL.
+        print(f"ERROR: inference pipeline exited {_rc}; no predictions were "
+              f"produced.", file=sys.stderr)
 
     # Step 3: Write final SQLs back to the input CSV under unified naming.
     print("=" * 60)

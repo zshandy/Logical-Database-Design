@@ -314,12 +314,17 @@ def build_gen_prompt(
     schema_links: str,
     history_block: str = "",
     paths_block: str = "",
+    dialect: str = "SQLite",
 ) -> str:
-    """Build the stage-2 SQL generation prompt."""
+    """Build the stage-2 SQL generation prompt.
+
+    ``dialect`` names the engine the query will actually run against, so the
+    model targets the right SQL flavour (BEAVER's splits execute on MySQL).
+    """
     history_instructions = _GEN_HISTORY_INSTRUCTIONS if history_block else ""
     return f"""You are a data science expert.
         Below, you are presented with a database schema and a question.
-        Your task is to read the schema, understand the question, and generate a valid SQLite query to answer the question.
+        Your task is to read the schema, understand the question, and generate a valid {dialect} query to answer the question.
         Before generating the final SQL query think step by step on how to write the query.
 
         Database Schema
@@ -359,7 +364,7 @@ def build_gen_prompt(
 
         Priority should be given to columns that have been explicitly matched with examples relevant to the question's context.
 
-        Take a deep breath and think step by step to find the correct sqlite SQL query. If you follow all the instructions and generate the correct query, I will give you 1 million dollars."""
+        Take a deep breath and think step by step to find the correct {dialect} SQL query. If you follow all the instructions and generate the correct query, I will give you 1 million dollars."""
 
 
 def build_revise_prompt(
@@ -372,6 +377,7 @@ def build_revise_prompt(
     query_result,
     history_block: str = "",
     paths_block: str = "",
+    dialect: str = "SQLite",
 ) -> str:
     """Build the stage-3 SQL revision prompt."""
     history_instructions = _REVISE_HISTORY_INSTRUCTIONS if history_block else ""
@@ -420,4 +426,4 @@ def build_revise_prompt(
             "revised_SQL": "Your revised SQL query."
         }}
 
-        Take a deep breath and think step by step to find the correct sqlite SQL query. If you follow all the instructions and generate the correct query, I will give you 1 million dollars."""
+        Take a deep breath and think step by step to find the correct {dialect} SQL query. If you follow all the instructions and generate the correct query, I will give you 1 million dollars."""

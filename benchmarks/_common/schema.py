@@ -8,6 +8,8 @@ from typing import List, Optional, Union
 from func_timeout import func_set_timeout
 from langchain.sql_database import SQLDatabase
 
+from . import db_backend
+
 
 def get_database_schema(
     DB_URI: str,
@@ -134,7 +136,16 @@ def generate_schema_prompt(
 
     Optional ``alias_map`` (``{table: {col: {namespace: comment}}}``) injects
     inline ``-- <namespace> alias: ...`` comments for matching column lines.
+
+    ``db_path`` may be a SQLite file or a MySQL URI (see :mod:`_common.db_backend`).
     """
+    if db_backend.is_mysql(db_path):
+        return _generate_schema_prompt_mysql(
+            db_path, num_rows=num_rows, no_join=no_join, target_table=target_table,
+            extracted_values=extracted_values, alias_map=alias_map,
+            alias_namespace=alias_namespace,
+        )
+
     full_schema_prompt_list: List[str] = []
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -241,6 +252,91 @@ def generate_schema_prompt(
     return schema_prompt
 
 
+def _generate_schema_prompt_mysql(
+    db_path: str,
+    num_rows: Optional[int] = None,
+    no_join: bool = False,
+    target_table: str = "all",
+    extracted_values: Optional[dict] = None,
+    alias_map: Optional[dict] = None,
+    alias_namespace: str = "workload",
+) -> str:
+    """MySQL counterpart of :func:`generate_schema_prompt`.
+
+    Produces byte-comparable output to the SQLite path: cleaned ``CREATE TABLE``
+    DDL followed by an optional ``/* N rows from <table>: ... */`` block.
+    """
+    if extracted_values is None:
+        extracted_values = {}
+
+    all_names = db_backend.list_tables_and_views(db_path)
+    by_lower = {n.lower(): n for n in all_names}
+
+    if target_table != "all":
+        # Honour the caller's casing in the emitted DDL — the workload and gold
+        # SQL use BEAVER's uppercase names while MySQL stores them lowercased.
+        tables = [target_table] if target_table.lower() in by_lower else []
+    elif no_join:
+        tables = [n for n in all_names if "_join_" not in n.lower()]
+    else:
+        tables = list(all_names)
+
+    pieces: List[str] = []
+
+    for tname in tables:
+        raw_sql = db_backend.get_create_statement(db_path, tname)
+        if raw_sql is None:
+            continue
+
+        final_sql = raw_sql
+
+        if alias_map and tname in alias_map:
+            new_lines = []
+            for line in raw_sql.split("\n"):
+                stripped = line.strip()
+                tokens = stripped.split()
+                if tokens:
+                    raw_col_token = tokens[0].strip("`\"")
+                    if (
+                        raw_col_token in alias_map[tname]
+                        and alias_namespace in alias_map[tname][raw_col_token]
+                        and "--" not in stripped
+                    ):
+                        alias_comment = alias_map[tname][raw_col_token][alias_namespace]
+                        line = f"{line}    -- {alias_namespace} alias: {alias_comment}"
+                new_lines.append(line)
+            final_sql = "\n".join(new_lines)
+
+        if num_rows:
+            column_names, db_rows = db_backend.get_sample_rows(db_path, tname, num_rows)
+            if column_names:
+                table_extracted = {
+                    col.split(".", 1)[1]: vals
+                    for col, vals in extracted_values.items()
+                    if col.split(".", 1)[0].lower() == tname.lower()
+                }
+
+                extracted_rows = []
+                if table_extracted:
+                    max_len = max(len(vs) for vs in table_extracted.values())
+                    for i in range(max_len):
+                        row_dict = {c: "" for c in column_names}
+                        for col, vals in table_extracted.items():
+                            if col in row_dict and i < len(vals):
+                                row_dict[col] = vals[i]
+                        extracted_rows.append(tuple(row_dict[c] for c in column_names))
+
+                final_rows = list(db_rows) + extracted_rows
+                rows_prompt = nice_look_table(column_names=column_names, values=final_rows)
+                final_sql += "\n\n" + "/* \n {} rows from {}: \n {} \n */".format(
+                    len(final_rows), tname, rows_prompt
+                )
+
+        pieces.append(final_sql)
+
+    return "\n\n".join(pieces)
+
+
 def nice_look_table(column_names: list, values: list) -> str:
     """Format column names + rows as a right-justified text table."""
     rows: List[str] = []
@@ -258,7 +354,10 @@ def nice_look_table(column_names: list, values: list) -> str:
 
 
 def list_tables_and_views(sqlite_path: str) -> List[str]:
-    """Sorted list of user-defined tables and views in a SQLite database."""
+    """Sorted list of user-defined tables and views (SQLite file or MySQL URI)."""
+    if db_backend.is_mysql(sqlite_path):
+        return db_backend.list_tables_and_views(sqlite_path)
+
     conn = sqlite3.connect(sqlite_path)
     cursor = conn.cursor()
     cursor.execute(

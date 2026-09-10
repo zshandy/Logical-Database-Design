@@ -19,6 +19,9 @@ tqdm==4.67.1
 requests==2.32.5
 tiktoken==0.12.0
 func_timeout==4.3.5
+# MySQL driver — required only for the BEAVER splits (--dataset dw/neutron/nova),
+# which _common/db_backend.py reaches over a mysql:// URI instead of a .sqlite file.
+pymysql==1.1.1
 
 # ---- csc_sql (inference pipeline + dataset processing) ----
 ijson

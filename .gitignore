@@ -3,9 +3,38 @@
 databases/
 csvs/
 benchmarks/cache/
+# MySQL credentials for the BEAVER splits (see _common/db_backend.py).
+.env
 **/__pycache__/
 benchmarks/_common/__pycache__/
 logs/
 outputs/
 mapping_files/
 The_Case_for_Text_to_SQL_Friendly_Logical_Database_Design____VLDB.pdf
+# Ablations, additional experiments and the revision analysis scripts.
+# Not part of the pipeline; kept locally and excluded from the public repo.
+analysis/
+
+# AutoLink and DeepEye-SQL are vendored under benchmarks/ so their provenance
+# is visible, but both write their run state into the source tree rather than
+# into <LDD>/logs|outputs. These are the directories they generate; every one
+# is either a trace or is regenerable (AutoLink's resource/ + exposed/ come
+# from run/prep_ldd_inputs.py, DeepEye's workspace/ from its runners), so none
+# of it belongs in the published pipeline.
+benchmarks/AutoLink/run/log_*/
+benchmarks/AutoLink/run/runlogs/
+benchmarks/AutoLink/run/cache/
+benchmarks/AutoLink/run/embeddings/
+benchmarks/AutoLink/run/documents/
+benchmarks/AutoLink/run/resource/
+benchmarks/AutoLink/run/exposed/
+benchmarks/AutoLink/run/questions_*.json
+benchmarks/AutoLink/run/uncompleted_instances.txt
+benchmarks/AutoLink/linking_results/
+benchmarks/DeepEye-SQL/logs/
+benchmarks/DeepEye-SQL/workspace/
+benchmarks/DeepEye-SQL/*workspace*/
+benchmarks/DeepEye-SQL/results/
+benchmarks/DeepEye-SQL/data/
+benchmarks/DeepEye-SQL/exp/
+benchmarks/DeepEye-SQL/config/local/

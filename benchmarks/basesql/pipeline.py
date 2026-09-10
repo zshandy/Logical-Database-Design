@@ -123,6 +123,10 @@ class PipelineState:
     per_db_cache: Dict[str, Tuple] = field(default_factory=dict)
     per_db_warned: set = field(default_factory=set)
 
+    # SQL flavour the generated query will execute against, named in the
+    # stage-2/3 prompts. Follows the backend behind ``db_path``.
+    dialect: str = "SQLite"
+
     log_dir: str = ""
     output_dir: str = ""
     suffix: str = ""
@@ -321,10 +325,14 @@ def setup(args: argparse.Namespace, df: pd.DataFrame) -> PipelineState:
         args.rename, rename_v_suffix, args=args,
     )
 
+    from _common import db_backend
+    dialect = "MySQL" if db_backend.is_mysql(args.db_path) else "SQLite"
+
     state = PipelineState(
         args=args,
         db_path=args.db_path,
         is_gemini=is_gemini,
+        dialect=dialect,
         ds_org_tables=list(ds_org_tables),
         ds_db_dict=dict(ds_db_dict),
         base_tables=list(base_tables),
@@ -786,6 +794,7 @@ def _run_stage2_generation(
         schema_links=schema_links,
         history_block=history_block,
         paths_block=paths_block,
+        dialect=state.dialect,
     )
     append_log(state.log_dir, index, "STAGE 2 PROMPT: SQL generation", gen_prompt)
     if state.is_gemini:
@@ -815,6 +824,7 @@ def _run_stage3_revision(
         query_result=query_result["RESULT"],
         history_block=history_block,
         paths_block=paths_block,
+        dialect=state.dialect,
     )
     append_log(state.log_dir, index, "STAGE 3 PROMPT: SQL revision", rev_prompt)
     if state.is_gemini:
@@ -1006,9 +1016,26 @@ def run(argv: Optional[list] = None) -> None:
     args = parse_args(argv)
     resolve_paths(args, pipeline_tag="basesql")
 
-    for label, path in (("--csv_path", args.csv_path), ("--db_path", args.db_path)):
-        if not os.path.exists(path):
-            raise SystemExit(f"{label} not found at {path}. Pass {label} explicitly.")
+    if not os.path.exists(args.csv_path):
+        raise SystemExit(f"--csv_path not found at {args.csv_path}. Pass --csv_path explicitly.")
+
+    # --db_path is either a SQLite file or a MySQL URI. For MySQL, prove the
+    # connection works now rather than failing on the first schema read.
+    from _common import db_backend
+    if db_backend.is_mysql(args.db_path):
+        try:
+            n_tables = len(db_backend.list_tables_and_views(args.db_path))
+        except Exception as e:
+            cfg = db_backend.parse_mysql_uri(args.db_path)
+            raise SystemExit(
+                f"--db_path {args.db_path} could not be reached: {e}\n"
+                f"  resolved to host={cfg['host']}:{cfg['port']} user={cfg['user']} db={cfg['database']}\n"
+                f"  set MYSQL_HOST / MYSQL_PORT / MYSQL_USER / MYSQL_PASSWORD, or put them "
+                f"in <LDD_ROOT>/.env or the file named by MYSQL_ENV_FILE."
+            )
+        print(f"🔌 MySQL backend: {args.db_path} ({n_tables} tables/views)")
+    elif not os.path.exists(args.db_path):
+        raise SystemExit(f"--db_path not found at {args.db_path}. Pass --db_path explicitly.")
 
     validate_args(args)
     default_cluster_filter(args)

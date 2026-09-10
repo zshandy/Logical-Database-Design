@@ -64,6 +64,10 @@ def find_foreign_keys_between_tables(sqlite_path: str, tables: Sequence[str]) ->
     if not tables:
         return []
 
+    from . import db_backend
+    if db_backend.is_mysql(sqlite_path):
+        return db_backend.find_foreign_keys_between_tables(sqlite_path, tables)
+
     norm_to_orig: Dict[str, str] = {}
     for t in tables:
         n = normalize_table_name(t)

@@ -1,375 +1,281 @@
-# prep_database
+# Building and preparing the database
 
-LLM-assisted schema preparation for a merged SQLite database. Produces a
-single consolidated JSON (the "prep JSON") that every downstream NL2SQL
-baseline in this repo loads to know:
+Two steps sit before any pipeline runs:
 
-- which tables are active (the originals, or LLM-renamed views on top of them)
-- how original column names map to renamed column names
-- which table-sets cluster together in the workload
-- which cluster-views exist and how the history SQLs are rewritten against them
+- **`create_database.py`** merges the benchmarks' per-database SQLite files
+  into one union database, and can replay the paper's exact view layer.
+- **`prep_database.py`** is the LLM-assisted schema prep. It produces one
+  consolidated JSON — the "prep JSON" — that every pipeline reads to know
+  which tables are active, how columns were renamed, which table-sets cluster
+  together, and which cluster-views exist.
 
-Run [`prep_database.py`](prep_database.py) once per (database, history)
-combination; the four baselines ([`basesql/`](basesql/), [`din-sql/`](din-sql/),
-[`csc_sql/`](csc_sql/), [`MAC-SQL/`](MAC-SQL/)) then read the resulting JSON
-through [`_common/rename_mapping.py`](_common/rename_mapping.py).
+If you only want to reproduce the paper, you need step 1 and the shipped
+`.sql` — **not** step 2. See
+[Recreating the published database](#recreating-the-published-database).
 
 ---
 
-## What it does (phase by phase)
+## Step 1 — `create_database.py`
 
-Each phase is independently gated by a flag. A typical run combines them.
+The benchmarks ship one SQLite file per database (BIRD dev: 11; Spider dev:
+20, of which the published Spider-Union uses 19). Every experiment here runs
+against a single *union* of them, because the point of the study is a schema
+large enough that table selection is genuinely hard.
+
+**Get the source databases first.** They are the benchmarks' own files and are
+not redistributed here — `databases/` is gitignored. Download the dev splits
+yourself:
+
+- BIRD: <https://bird-bench.github.io/> → `dev.zip`, whose `dev_databases/`
+  holds the 11 per-database directories.
+- Spider: <https://yale-lily.github.io/spider> → `spider.zip`, whose
+  `database/` holds all 166 (Spider-Union uses 19 of them; `--dataset spider`
+  selects them for you).
+
+Point `--src` at whichever directory you unpacked them into — the layout on
+disk does not matter and nothing has to be moved into `databases/`. `--src`
+accepts the benchmark's nested form (`<src>/<db>/<db>.sqlite`) or a flat
+directory of `<db>.sqlite`, and every other path is an explicit argument too,
+so you can keep the downloads wherever they already live:
+
+```bash
+python create_database.py --dataset bird \
+    --src /path/to/bird/dev_databases \
+    --out /path/to/merged_bird_base.sqlite
+```
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--src` / `--out` | — | source directory / merged output path |
+| `--dataset` | `bird` | Restricts the merge to that dataset's **published union**, read from `_common/datasets.py`. This matters: a full Spider download has 166 database directories but Spider-Union uses 19 — without the restriction you silently build a different, much larger schema. |
+| `--all-dbs` | off | merge everything under `--src` instead |
+| `--on-collision` | `abort` | Two sources declaring the same table name. `abort` lists the clashes; `prefix` renames to `<db>_<table>`; `skip` keeps the first. BIRD and Spider have zero collisions, so this never fires — it exists so a different corpus can't silently lose a table. |
+| `--with-views` | off | also copy views (the union is base tables only) |
+| `--force` / `--dry_run` | off | overwrite `--out` / report and exit |
+
+**What it preserves.** Each table is created from the source's own
+`sqlite_master.sql` text, unmodified — so types, DEFAULTs, PRIMARY KEYs and
+FOREIGN KEYs survive verbatim. Not cosmetic: the FK graph is what the star and
+denormalisation catalogues derive from, so a merge that dropped or normalised
+FKs would silently change downstream results. Explicit indexes and triggers
+are copied too.
+
+| Dataset | Source DBs | Tables | Rows | FK edges |
+|---|---|---|---|---|
+| BIRD-Union | 11 | 75 | 3,932,735 | 105 |
+| Spider-Union | 19 | 78 | 539,844 | 63 |
+
+Row counts match the sources table-for-table.
+
+---
+
+## Recreating the published database
+
+On top of the base tables sit three view families, catalogued in
+[`_common/datasets.py`](_common/datasets.py):
+
+| Family | Used by |
+|---|---|
+| `renamed_tables` | +R — one view per base table under its renamed identifiers |
+| `org_views` | +A — the workload-mined cluster catalogue |
+| `renamed_views` | +A+R — the same catalogue over the renamed tables |
+
+Re-running `prep_database.py` will **not** reproduce them, because the rename
+and view-creation phases are LLM calls. So the exact layer ships as SQL and
+replays offline.
+
+Everything below is in [`recreate_database/`](recreate_database/):
+
+| File | Contents |
+|---|---|
+| `bird_benchmark_views.sql` | 203 `CREATE VIEW` — 75 renamed tables + 64 org + 64 renamed |
+| `spider_benchmark_views.sql` | 192 — 78 renamed tables + 57 org + 57 renamed |
+| `name_mapping_{bird,spider}.json` | `table_to_view`, `column_mapping`, `columns` |
+| `sample_{bird,spider}_min.csv` | history pool — 767 × 11 / 502 × 8 |
+| `nl2sql_{bird,spider}_min.csv` | eval set + published predictions — 767 × 105 / 502 × 102 |
+
+The `.sql` files are emitted in dependency order with per-family banners:
+renamed tables and mined views read the base tables, and the renamed cluster
+views read the renamed table views, so those come last.
+
+```bash
+# 1. merge the shipped per-database files
+python create_database.py --dataset bird \
+    --src ../databases/bird_base_databases --out ../databases/merged_bird_base.sqlite
+
+# 2. capture the view layer from a reference DB (already done — this is how
+#    the shipped .sql was produced)
+python create_database.py --dataset bird --from-db ../databases/merged_bird.sqlite \
+    --dump_benchmark recreate_database/bird_benchmark_views.sql
+
+# 3. rebuild the full benchmark DB from (1) + (2) — no LLM, no reference DB
+python create_database.py --dataset bird \
+    --src ../databases/bird_base_databases --out ../databases/merged_bird.sqlite \
+    --recreate_benchmark recreate_database/bird_benchmark_views.sql
+```
+
+Step 3 also accepts an existing `--out` with no `--src`, replaying the view
+layer onto that database. Verified: recreation produces exactly the 203 and
+192 views, all returning row counts identical to the reference databases.
+
+### Columns in the shipped CSVs
+
+`sample_<ds>_min.csv` is the history pool (the demonstrations retrieved at
+inference time); `nl2sql_<ds>_min.csv` is the evaluation set. Spider's
+benchmark files carry no `question_id`, `evidence` or `difficulty`, hence its
+lower column counts.
+
+**Inputs** — what the pipeline reads:
+
+| Column | In | Purpose |
+|---|---|---|
+| `question_id`, `db_id`, `question`, `evidence`, `SQL`, `difficulty` | both | the benchmark's own fields; `SQL` is the gold used for execution scoring |
+| `gt_tables` | both | ground-truth table set; drives cluster mining, so **+P cannot be reproduced without it** |
+| `view_SQL` | sample | the demonstration rendered against the mined views — the second half of the top-k×2 block +A shows the model |
+| `renamed_SQL`, `gt_renamed_tables`, `renamed_view_SQL` | sample | the same three in the +R namespace |
+| `base_linking_41m_{org,renamed}` | nl2sql | recorded stage-1 linking. Reusing it via `--use_linking` is how every published arm skipped stage 1, so it is required to reproduce them *exactly* rather than approximately. |
+
+`name_mapping_<ds>.json` carries a `columns` section declaring which of those
+`--rename` should read (`sql: renamed_SQL`, `gt_tables: gt_renamed_tables`,
+`view_sql: renamed_view_SQL`). Without it the pipeline defaults to `sql=SQL`,
+the *original* namespace — a renamed schema with original-namespace
+demonstrations, which degrades silently rather than erroring.
+
+**Outputs** — the published predictions, for inspection; a reproduction should
+regenerate these rather than read them:
+
+```
+<approach>_sql[_<config>]_<backbone>          the model's final SQL
+<approach>_sql[_<config>]_<backbone>_result   1 if it matched gold on execution
+```
+
+| Part | Values |
+|---|---|
+| approach | `basesql`, `dinsql`, `macsql`, `cscsql` |
+| config | *(omitted for baseline)*, `A`, `P`, `R`, `AP`, `AR`, `PR`, `APR` |
+| backbone | `41m` (gpt-4.1-mini), `54m` (gpt-5.4-mini), `gem25` (gemini-2.5-flash-lite) |
+
+e.g. `basesql_sql_41m`, `cscsql_sql_APR_41m_result`. All four approaches ship
+at `41m`; `54m` and `gem25` are BaseSQL-only, matching the backbone table. 48
+prediction + 48 result columns per dataset. The 50%-history ablation is not
+shipped.
+
+---
+
+## Step 2 — `prep_database.py`
+
+Only needed to prepare a **new** database. Each phase is independently gated.
 
 | Phase | Flag | What it does |
-|-------|------|--------------|
-| 1. Backup | always | Copies the input sqlite to `<db>.bak.<timestamp>` before any modification. |
-| 2. Rename LLM call | `--rename` | One prompt that asks the LLM for one `CREATE VIEW` per base table — same rows, same columns in the same order, with `AS` renames. Both the prompt and the raw response are cached to disk. |
-| 3. Apply views | `--rename` | Executes each `CREATE VIEW` against the DB and verifies the view's column count matches the base table's. Re-prompts the LLM up to `--max_retries` times for failures, then falls back to identity (keeps the original table name) for anything still failing. |
-| 4. Rename mapping | `--rename` | Writes the `rename` section of the prep JSON (`table_to_view`, `column_mapping`) and switches the top-level `tables` list from originals to renamed views. |
-| 5. History rewrite (rename) | `--rename` + history | For each row in the history CSV, asks the LLM to rewrite the SQL against the renamed views, verifies by executing both rewritten and original against the DB and comparing result sets. Failed rows get retried, then fall back to the original SQL with `result=0`. Adds `<renamed_sql_col>`, `<renamed_sql_col>_result`, `gt_<stem>_tables` columns to the history CSV in place (with a backup). |
-| 6. Cluster mining | `--cluster` (or implied by `--view`) | Pure-computation phase, no LLM. Mines frequent table-set clusters from history (see [`_common/clusters.py`](_common/clusters.py)). Saved into the prep JSON only when `--cluster` is set; built in-memory only when `--view` is set without `--cluster`. |
-| 7. Cluster view creation | `--view` | For each cluster with ≥2 tables, asks the LLM for one `CREATE VIEW` that joins the cluster's tables on their FKs. Retries `--view_max_create_retries` times, then falls back to a code-based FK-walker that emits joins from the introspected schema + JOIN edges observed in the history. Skips clusters where no non-cartesian join is reachable. |
-| 8. History rewrite (view) | `--view` + history | Same shape as phase 5, but the LLM is allowed to use cluster views in addition to the renamed base tables. Adds `<view_sql_col>` and `<view_sql_col>_result` to the history CSV. |
+|---|---|---|
+| 1. Backup | always | copies the input to `<db>.bak.<timestamp>` before any modification |
+| 2. Rename call | `--rename` | one prompt asking for a `CREATE VIEW` per base table — same rows and column order, with `AS` renames. Prompt and raw response are cached. |
+| 3. Apply views | `--rename` | executes each view and checks its column count against the base table; re-prompts up to `--max_retries`, then falls back to identity |
+| 4. Rename mapping | `--rename` | writes the `rename` section (`table_to_view`, `column_mapping`) and switches `tables` from originals to renamed views |
+| 5. History rewrite | `--rename` + history | rewrites each history SQL against the renamed views, **verified by executing both and comparing result sets**; failures retry, then fall back to the original with `result=0` |
+| 6. Cluster mining | `--cluster` (implied by `--view`) | no LLM — mines frequent table-set clusters from history ([`_common/clusters.py`](_common/clusters.py)). Saved to the JSON only with `--cluster`; in-memory when `--view` alone. |
+| 7. Cluster views | `--view` | one `CREATE VIEW` per ≥2-table cluster joining on FKs. Retries `--view_max_create_retries`, then falls back to a code-based FK-walker using the schema plus JOIN edges seen in history. Skips clusters with no non-cartesian join. |
+| 8. History rewrite (view) | `--view` + history | as phase 5, but the LLM may also use cluster views |
 
-The cached prompts + raw + parsed responses for each LLM call land in
-`<LDD>/outputs/prep_database/<timestamp>/`, keyed by phase and attempt — so
-every decision is auditable after the fact.
+Every LLM call caches its prompt, raw response and parsed JSON to
+`<LDD>/outputs/prep_database/<timestamp>/`, keyed by phase and attempt, so
+each decision stays auditable. Labels: `prompt`/`raw`/`response` (phase 2),
+`retryN` (3), `rewrite_*` (5), `view_create_cN_attemptM` and
+`..._codefallback` (7), `view_rewrite_*` (8). Persistent failures appear in
+the closing summary and, for renames, as identity entries in the JSON.
 
----
+### Inputs
 
-## Inputs
+**Merged SQLite** (required) — default `<LDD>/databases/merged_<dataset>.sqlite`,
+or `--db_path`. Backed up before any write.
 
-### 1. Merged SQLite (required)
-
-A single `.sqlite` file containing **all the base tables** from every source
-database you want covered, merged into one DB. Tables from different source DBs
-just sit side by side; the LLM uses naming + workload signals to figure out
-which tables came from which source.
-
-- Default location: `<LDD>/databases/merged_<dataset>.sqlite`
-  (e.g. `databases/merged_bird.sqlite`).
-- Pass `--db_path` to point elsewhere.
-- The script reads via PRAGMA / sqlite3; any sqlite3-compatible file works.
-- The input is backed up before any modification (phase 1) — you can always
-  recover the pre-prep state by restoring the `.bak.<timestamp>` sibling.
-
-### 2. Benchmark CSV (required for any phase that needs questions/SQLs)
-
-Currently consumed only by the history phases (5, 8) and the cluster miner
-(phase 6). If you're running plain `--rename` with no history, you don't need
-this file. Required columns:
-
-| Column | Default name | Override | Notes |
-|--------|--------------|----------|-------|
-| Question | `question` | `--question_col` | Plain English NL question. |
-| Gold SQL | `SQL` | `--sql_col` | Executable SQLite. Used for execution-verification of every rewrite. |
-
-Extra columns (e.g. `db_id`, `evidence`, baseline-specific output columns) are
-preserved verbatim — the script only reads the two columns above and appends
-the phase-5/8 rewrite columns at the end.
-
-### 3. History CSV (optional, same shape as the benchmark CSV)
-
-When provided, history feeds both the cluster miner (phase 6) and the rename
-LLM call (phase 2 — appears to the LLM as "tables that co-occur in the same
-SQL are from the same source DB"). Same required columns as the benchmark CSV
-(`question`, `SQL`).
-
-| Flag | Effect |
-|------|--------|
-| (neither flag) | History disabled. Phases 5, 6, 7, 8 are unavailable. |
-| `--history` | Uses `<LDD>/csvs/sample_<dataset>.csv`. |
-| `--history_path FILE` | Uses `FILE`, **and** implicitly enables history. |
-
-The history CSV is **rewritten in place** by phases 5 and 8 (with a
-timestamped backup). The new columns are additive — `renamed_SQL`,
+**History CSV** (optional but needed for phases 5–8) — `--history` uses
+`<LDD>/csvs/sample_<dataset>.csv`; `--history_path FILE` implies `--history`.
+Needs a question column (`--question_col`, default `question`) and an
+executable gold-SQL column (`--sql_col`, default `SQL`); every rewrite is
+execution-verified against it. Other columns are preserved verbatim. The file
+is **rewritten in place** with a timestamped backup, adding `renamed_SQL`,
 `renamed_SQL_result`, `gt_renamed_tables`, `renamed_view_SQL`,
-`renamed_view_SQL_result` — and don't disturb columns produced by other
-tooling.
+`renamed_view_SQL_result`.
 
----
-
-## Setup
-
-### Python deps
-
-Everything is in [`benchmarks/requirements.txt`](requirements.txt). The core
-deps for prep_database specifically are:
-
-```
-openai            # phase 2, 3, 5, 7, 8 LLM calls
-google-genai      # only when --model starts with 'gemini'
-sqlglot           # CREATE VIEW parsing + table extraction + JOIN edge mining
-pandas            # history CSV I/O
-func_timeout      # SQL execution timeouts in phase 5/8 verification
-```
-
-### Environment variables
-
-| Variable | Required by | Purpose |
-|----------|-------------|---------|
-| `OPENAI_API_KEY` | Default `--model gpt-4.1-mini` and any other OpenAI model | OpenAI chat completions |
-| `GEMINI_API_KEY` | `--model gemini-...` | Google GenAI |
-
-No keys are embedded in the code — both are read via `os.environ.get` inside
-[`_common/llm.py`](_common/llm.py).
-
----
-
-## Important flags
-
-The full list is `python prep_database.py --help`. The highlights:
-
-### Phase selection
-
-| Flag | Default | What it gates |
-|------|---------|---------------|
-| `--rename` | off | Phases 2–5. Without this, the script jumps straight to phase 6 / 7 / 8 if those are on. |
-| `--cluster` | off | Phase 6, with cluster artifacts saved into the prep JSON. Requires history. |
-| `--view` | off | Phases 6 (in-memory if `--cluster` is off), 7, 8. Requires history. |
-
-You can run any subset. Common combinations:
-
-- `--rename` — rename + history rewrite only. No clusters, no cluster views.
-- `--rename --cluster` — rename + mine clusters, no cluster views.
-- `--rename --view` — rename + cluster views (clusters mined in-memory, not saved).
-- `--rename --cluster --view` — full pipeline. The recommended combination if
-  you intend to use any of the downstream baselines' cluster/view modes.
-- `--view` alone — cluster views over the ORIGINAL (un-renamed) tables.
-
-### Inputs / outputs
+### Flags
 
 | Flag | Default | Notes |
-|------|---------|-------|
-| `--db_path` | required | Path to the merged sqlite. |
-| `--history_path` | none | Path to the history CSV. Implies `--history`. |
-| `--history` | off | Use the default `<LDD>/csvs/sample_<dataset>.csv`. |
-| `--question_col` | `question` | Override if your CSV uses a different header. |
-| `--sql_col` | `SQL` | Same. |
-| `--output_mapping_path` | `<LDD>/mapping_files/prep_<stem>[_renamed].json` | Bare filename → resolved under the standard `mapping_files/` dir. Absolute path → used verbatim. |
-| `--cache_dir` | `<LDD>/outputs/prep_database/<timestamp>/` | Where prompts + raw/parsed LLM responses are written. |
+|---|---|---|
+| `--rename` / `--cluster` / `--view` | off | phase gates (2–5 / 6 / 6–8) |
+| `--model` | `gpt-4.1-mini` | names starting with `gemini` route to Google GenAI |
+| `--output_mapping_path` | `mapping_files/prep_<stem>[_renamed].json` | bare filename resolves under `mapping_files/`; absolute is used verbatim |
+| `--cache_dir` | `outputs/prep_database/<timestamp>/` | prompts and responses |
+| `--num_rows` / `--max_tokens` | 3 / 32000 | sample rows per table in the prompt / output cap |
+| `--max_retries` | 3 | phase-3 view re-prompts |
+| `--rewrite_max_retries` | 5 | phase-5 retries |
+| `--view_max_create_retries` | 3 | phase-7 retries before the code fallback |
+| `--view_max_rewrite_retries` | 5 | phase-8 retries |
+| `--min_frequency` / `--min_tables` | 5 / 2 | a table-set needs this many history questions, and this many tables, to become a cluster |
+| `--cluster_col` / `--cluster_sql_col` | inferred | history columns holding table lists / SQL for join paths. Default `gt_renamed_tables` with `--rename`, else `gt_tables`; missing → extracted from SQL via sqlglot. |
+| `--dry_run` / `--cache_only` / `--from_cache PATH` | off | build the prompt and exit / stop after caching / skip the call and run phases 3–5 from a cached response |
 
-### Model + retries
+Environment: `OPENAI_API_KEY`, or `GEMINI_API_KEY` for `gemini-*`. Both read
+via `os.environ.get` in [`_common/llm.py`](_common/llm.py); nothing is
+embedded. Core deps are `openai`, `google-genai`, `sqlglot`, `pandas`,
+`func_timeout` (see [requirements.txt](requirements.txt)).
 
-| Flag | Default | Notes |
-|------|---------|-------|
-| `--model` | `gpt-4.1-mini` | Names starting with `gemini` route through Google GenAI; everything else uses OpenAI. |
-| `--num_rows` | 3 | Sample rows per table in the schema prompt. |
-| `--max_tokens` | 32000 | Output token cap for the LLM call. |
-| `--max_retries` | 3 | Phase 3 re-prompts for tables whose CREATE VIEW failed verification. |
-| `--rewrite_max_retries` | 5 | Phase 5 retries for SQL rewrites that don't match ground truth. |
-| `--view_max_create_retries` | 3 | Phase 7 retries before the code-based fallback. |
-| `--view_max_rewrite_retries` | 5 | Phase 8 retries. |
-
-### Clustering knobs
-
-| Flag | Default | Notes |
-|------|---------|-------|
-| `--min_frequency` | 5 | A table-set has to be shared by this many history questions before it becomes a cluster. |
-| `--min_tables` | 2 | A cluster must span at least this many tables. |
-| `--cluster_col` | inferred from `--rename` | History-CSV column holding per-row table lists. Default: `gt_renamed_tables` if `--rename` else `gt_tables`. Missing → extracted from the SQL column via sqlglot. |
-| `--cluster_sql_col` | inferred from `--cluster_col` | History-CSV column with the SQL used for join paths. |
-
-### Iteration (rename only)
-
-| Flag | Effect |
-|------|--------|
-| `--dry_run` | Build the prompt, cache it, exit before calling the LLM. Useful for previewing prompt size. |
-| `--cache_only` | Stop after the initial LLM response is cached. Useful for inspecting before committing. |
-| `--from_cache PATH` | Skip the LLM call; load a previously-cached response and run only phases 3–5. |
-
----
-
-## Example commands
-
-All examples assume you're in `benchmarks/`. Adjust paths if you run from
-elsewhere.
-
-### Just rename (no history, no clusters, no views)
+### Examples
 
 ```bash
-python prep_database.py \
-    --db_path ../databases/merged_bird.sqlite \
-    --rename
+# full pipeline — the recommended combination
+python prep_database.py --db_path ../databases/merged_bird.sqlite \
+    --history_path ../csvs/sample_bird.csv --rename --cluster --view
+
+# rename only, no history
+python prep_database.py --db_path ../databases/merged_bird.sqlite --rename
+
+# cluster views over the ORIGINAL schema, to isolate +A
+python prep_database.py --db_path ../databases/merged_spider.sqlite \
+    --history_path ../csvs/sample_spider.csv --cluster --view
+
+# mine clusters only — no LLM call at all
+python prep_database.py --db_path ../databases/merged_bird.sqlite \
+    --history_path ../csvs/sample_bird.csv --cluster
+
+# preview the prompt before paying for it
+python prep_database.py --db_path ../databases/merged_bird.sqlite --rename --dry_run
 ```
 
-Writes `mapping_files/prep_bird_renamed.json` with the `rename` section only.
+### Output: the prep JSON
 
-### Rename + history rewrite
-
-```bash
-python prep_database.py \
-    --db_path ../databases/merged_bird.sqlite \
-    --history_path ../csvs/sample_bird.csv \
-    --rename
-```
-
-Adds `renamed_SQL`, `renamed_SQL_result`, `gt_renamed_tables` columns to
-`sample_bird.csv` in place (with a `.bak.<timestamp>` backup).
-
-### Full pipeline (rename + cluster + view)
-
-```bash
-python prep_database.py \
-    --db_path ../databases/merged_bird.sqlite \
-    --history_path ../csvs/sample_bird.csv \
-    --rename --cluster --view \
-    --model gpt-4.1-mini
-```
-
-Writes all four sections (`rename`, `cluster`, `view`, plus top-level `tables`
-and `columns`) to `mapping_files/prep_bird_renamed.json`. Adds
-`renamed_SQL`, `renamed_view_SQL`, and their `_result` columns to the history
-CSV.
-
-### Cluster views over the original schema (no rename)
-
-```bash
-python prep_database.py \
-    --db_path ../databases/merged_spider.sqlite \
-    --history_path ../csvs/sample_spider.csv \
-    --cluster --view
-```
-
-The clusters/views are built directly over the original table names. Useful
-when you want to study the effect of cluster views in isolation.
-
-### Just mine clusters (no LLM at all)
-
-```bash
-python prep_database.py \
-    --db_path ../databases/merged_bird.sqlite \
-    --history_path ../csvs/sample_bird.csv \
-    --cluster
-```
-
-No model call — pure computation. The output JSON contains only the `cluster`
-section (plus `tables` and `columns`).
-
-### Inspect the rename prompt before paying for the LLM call
-
-```bash
-python prep_database.py \
-    --db_path ../databases/merged_bird.sqlite \
-    --history_path ../csvs/sample_bird.csv \
-    --rename --dry_run
-```
-
-Prompt is cached to `outputs/prep_database/<ts>/<stem>_<ts>.prompt.txt`; no
-LLM call is made. Inspect it, then drop `--dry_run` for the real run.
-
-### Resume from a cached LLM response
-
-```bash
-python prep_database.py \
-    --db_path ../databases/merged_bird.sqlite \
-    --history_path ../csvs/sample_bird.csv \
-    --rename \
-    --from_cache outputs/prep_database/20260605-104012/merged_bird_20260605-104015.response.json
-```
-
-Skips phase 2; runs phases 3–5 against the cached response. Useful when phase
-3 fails for an external reason (e.g. disk full) and you don't want to repay
-for the rename LLM call.
-
-### Use Gemini instead of OpenAI
-
-```bash
-export GEMINI_API_KEY=...
-python prep_database.py \
-    --db_path ../databases/merged_bird.sqlite \
-    --history_path ../csvs/sample_bird.csv \
-    --rename --cluster --view \
-    --model gemini-2.5-flash
-```
-
----
-
-## Output: the consolidated prep JSON
-
-Written to `--output_mapping_path` (default
-`<LDD>/mapping_files/prep_<stem>[_renamed].json`). All sections below are
-optional — present only if the corresponding phase ran.
+All sections are optional — present only if the phase ran.
 
 ```jsonc
 {
-  "metadata": {
-    "db_path":      "...",          // absolute path to the input sqlite
-    "dataset_stem": "bird",          // derived from the db filename
-    "rename":       true,
-    "cluster":      true,
-    "view":         true,
-    "built_at":     "2026-06-08T17:14:46"
-  },
+  "metadata": { "db_path": "...", "dataset_stem": "bird",
+                "rename": true, "cluster": true, "view": true,
+                "built_at": "2026-06-08T17:14:46" },
 
-  // The active table list for downstream baselines:
-  //  - with --rename: the renamed view names
-  //  - without --rename: the original base table names
-  "tables": ["chem_atom_dim", "club_member_roster", ...],
+  // active tables for downstream pipelines: renamed views with --rename,
+  // original base tables without
+  "tables": ["chem_atom_dim", "club_member_roster", "..."],
 
-  // The history-CSV column names this prep run used — downstream baselines
-  // read this so users don't have to retype --question_col / --sql_col etc.
-  "columns": {
-    "question":   "question",
-    "sql":        "renamed_SQL",
-    "gt_tables":  "gt_renamed_tables",
-    "view_sql":   "renamed_view_SQL"
-  },
+  // history-CSV columns this run used; pipelines read these so you don't
+  // have to retype --question_col / --sql_col
+  "columns": { "question": "question", "sql": "renamed_SQL",
+               "gt_tables": "gt_renamed_tables",
+               "view_sql": "renamed_view_SQL" },
 
-  "rename": {
-    "table_to_view": {"atom": "chem_atom_dim", ...},
-    "column_mapping": {
-      "chem_atom_dim": {"atom_id": "atom_pk", "element": "element_symbol", ...},
-      ...
-    }
-  },
+  "rename": { "table_to_view": { "atom": "chem_atom_dim" },
+              "column_mapping": { "chem_atom_dim": { "atom_id": "atom_pk" } } },
 
-  "cluster": {
-    "history_path":          "...",
-    "cluster_col":           "gt_renamed_tables",
-    "cluster_sql_col":       "renamed_SQL",
-    "min_frequency":         5,
-    "min_tables":            2,
-    "n_questions":           1534,
-    "n_clusters":            47,
-    "exact_clusters":        [{"cluster_id": 0, "tables": [...], "paths": [...]}, ...],
-    "question_cluster_map":  {"0": [3, 7], ...}
-  },
+  "cluster": { "cluster_col": "gt_renamed_tables", "min_frequency": 5,
+               "min_tables": 2, "n_questions": 1534, "n_clusters": 47,
+               "exact_clusters": [{ "cluster_id": 0, "tables": [], "paths": [] }],
+               "question_cluster_map": { "0": [3, 7] } },
 
-  "view": {
-    "n_clusters":       47,
-    "n_views_created":  39,
-    "n_views_skipped":  8,
-    "cluster_views":    ["chem_atom_dim_join_chem_bond_xref", ...],
-    "skipped_clusters": [{"cluster_id": 12, "reason": "..."}, ...]
-  }
+  "view": { "n_clusters": 47, "n_views_created": 39, "n_views_skipped": 8,
+            "cluster_views": ["chem_atom_dim_join_chem_bond_xref"],
+            "skipped_clusters": [{ "cluster_id": 12, "reason": "..." }] }
 }
 ```
 
-Downstream baselines load this JSON through
-[`_common/rename_mapping.py`](_common/rename_mapping.py)'s `load_active_views`,
-which auto-detects which sections are present.
-
----
-
-## Caching, retries, and audit trail
-
-Every LLM call (initial + retries) caches three files into the cache dir:
-
-```
-<cache>/<stem>_<ts>.<label>.prompt.txt   # exact prompt sent
-<cache>/<stem>_<ts>.<label>.raw.txt      # raw response from the API
-<cache>/<stem>_<ts>.<label>.response.json # parsed JSON (post-extract_json_block)
-```
-
-Labels encode the phase and attempt:
-- `prompt`/`raw`/`response` (no label) — phase 2 initial rename call
-- `retry1`/`retry2`/... — phase 3 view-fix re-prompts
-- `rewrite_initial`/`rewrite_retry_N`/`rewrite_initial_bN_ofN` — phase 5
-- `view_create_cN_attemptM` — phase 7 per-cluster view creation
-- `view_create_cN_codefallback.sql.txt` — phase 7 code-based fallback output
-- `view_rewrite_initial`/`view_rewrite_retry_N` — phase 8
-
-Persistent failures (after all retries) are surfaced in the final summary
-block on stdout — and, for the rename phase, are mirrored into the prep JSON
-as identity entries so downstream code doesn't have to special-case them.
+Pipelines load it through
+[`_common/rename_mapping.py`](_common/rename_mapping.py)'s
+`load_active_views`, which auto-detects the present sections.

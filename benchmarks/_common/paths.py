@@ -32,6 +32,12 @@ MAPPING_DIR: str = os.path.join(LDD_ROOT, "mapping_files")
 LOG_DIR: str = os.path.join(LDD_ROOT, "logs")
 OUTPUT_DIR: str = os.path.join(LDD_ROOT, "outputs")
 
+# BEAVER splits live in MySQL rather than as merged .sqlite files — their data
+# only exists there and their gold SQL is MySQL dialect. ``--db_path`` for these
+# resolves to a URI that ``_common.db_backend`` understands; credentials come
+# from MYSQL_* environment variables (or <LDD_ROOT>/.env).
+BEAVER_DATASETS = frozenset({"dw", "neutron", "nova"})
+
 
 def default_log_dir(benchmark: str, subdir: str = "") -> str:
     """Per-benchmark log directory: ``<LDD>/logs/<benchmark>[/<subdir>]``.
@@ -63,7 +69,13 @@ def default_csv_path(dataset: str, sample: int = 100) -> str:
 
 
 def default_db_path(dataset: str) -> str:
-    """Default sqlite DB: ``databases/merged_{dataset}.sqlite``."""
+    """Default DB handle for ``dataset``.
+
+    SQLite datasets resolve to ``databases/merged_{dataset}.sqlite``; BEAVER
+    splits resolve to a ``mysql://{dataset}`` URI instead.
+    """
+    if dataset in BEAVER_DATASETS:
+        return f"mysql://{dataset}"
     return os.path.join(DB_DIR, f"merged_{dataset}.sqlite")
 
 

@@ -24,10 +24,12 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
     """Register the common flag set on a pipeline's argparse parser."""
     p.add_argument(
         "--dataset",
-        choices=["spider", "bird"],
+        choices=["spider", "bird", "dw", "neutron", "nova"],
         default="spider",
         help="Dataset. Controls table/view lists, default paths, and log dir. "
-             "Default: spider.",
+             "'dw', 'neutron' and 'nova' are the BEAVER splits; each is a "
+             "standalone MySQL database (--db_path resolves to mysql://<name>) "
+             "rather than a merged .sqlite file. Default: spider.",
     )
     p.add_argument(
         "--model",
