@@ -43,10 +43,9 @@ from typing import Dict, List, Sequence, Set, Tuple
 
 import pandas as pd
 
-# Vendored under <LDD>/benchmarks/, so the repo root is derived from this
-# file's location rather than hardcoded -- the original absolute path only
-# worked on the machine the experiments were run on.
-LDD_BENCH = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir))
+LDD_BENCH = os.environ.get("LDD_BENCH") or os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 os.pardir, os.pardir))
 sys.path.insert(0, LDD_BENCH)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

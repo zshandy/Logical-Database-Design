@@ -7,7 +7,7 @@
 # under resource/databases/sqlite/, so they must run once after all three arms'
 # dumps exist -- not per arm.
 set -eu
-PY=D:/miniconda3/envs/openai-py39/python.exe
+PY="${PY:-python}"
 cd "$(dirname "$0")" || exit 1
 
 DS="${1:?dataset}"

@@ -31,10 +31,7 @@ benchmarks/AutoLink/run/exposed/
 benchmarks/AutoLink/run/questions_*.json
 benchmarks/AutoLink/run/uncompleted_instances.txt
 benchmarks/AutoLink/linking_results/
-benchmarks/DeepEye-SQL/logs/
-benchmarks/DeepEye-SQL/workspace/
-benchmarks/DeepEye-SQL/*workspace*/
-benchmarks/DeepEye-SQL/results/
-benchmarks/DeepEye-SQL/data/
-benchmarks/DeepEye-SQL/exp/
-benchmarks/DeepEye-SQL/config/local/
+# DeepEye-SQL is not part of the published evaluation -- the agentic results in
+# the paper come from AutoLink alone -- so the whole vendored tree is excluded
+# rather than just its run state.
+benchmarks/DeepEye-SQL/

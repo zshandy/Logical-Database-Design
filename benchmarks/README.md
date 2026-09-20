@@ -1,6 +1,6 @@
 # Benchmarks
 
-Six NL2SQL pipelines evaluated under the same three schema transformations.
+Five NL2SQL pipelines evaluated under the same three schema transformations.
 Each takes a question CSV + a merged SQLite database and writes predictions
 plus per-question prompt logs.
 
@@ -11,12 +11,10 @@ plus per-question prompt logs.
 | **MAC-SQL** | [MAC-SQL/run_union.py](MAC-SQL/run_union.py) | Selector → Decomposer → Refiner (multi-agent) | API |
 | **csc_sql** | [csc_sql/run_single_db.py](csc_sql/run_single_db.py) | sampling + merge/correction | local vLLM |
 | **AutoLink** | [AutoLink/run/run_arm.sh](AutoLink/run/run_arm.sh) | agentic schema completion → candidates → selection | DeepSeek API |
-| **DeepEye-SQL** | [DeepEye-SQL/script/run_ldd_spider_all.sh](DeepEye-SQL/script/run_ldd_spider_all.sh) | value retrieval → 3 linkers → generate → revise → select | API or local |
 
 The first four share one CLI surface and are run from their own folder.
-AutoLink and DeepEye-SQL are vendored upstream repos with our integration
-layered on; they keep their own multi-step drivers — see
-[AutoLink](#autolink) and [DeepEye-SQL](#deepeye-sql).
+AutoLink is a vendored upstream repo with our integration layered on; it keeps
+its own multi-step driver — see [AutoLink](#autolink).
 
 The three transformations map to the paper's operators:
 
@@ -41,7 +39,7 @@ Logical-Database-Design/
     ├── prep_database.py    step 1 — rename + clusters + views
     ├── recreate_database/  shipped view layer, CSVs, mapping
     ├── basesql/  din-sql/  MAC-SQL/  csc_sql/
-    └── AutoLink/  DeepEye-SQL/
+    └── AutoLink/
 ```
 
 Paths resolve from `--dataset` relative to the LDD root, so the shared data
@@ -208,8 +206,10 @@ Our integration lives alongside upstream's `run/` scripts:
 | `apply_apr.py` | injects +A views and +P cluster tables/join paths between retrieval and the agent loop |
 | `object_lists.json` | the org / renamed / view object universe per dataset |
 
-Arms are `base`, `opt1`, `opt2` and their `--rename` twins `rbase`, `ropt1`,
-`ropt2`. Prep must run before the arm, and builds documents + embeddings for
+Arms are `base`, `a` (+A), `p` (+P), `opt1`/`opt2` (+A+P) and their `--rename`
+twins `rbase`, `ar`, `pr`, `ropt1`/`ropt2` — eight published configurations
+per dataset. `opt2` re-retrieves inside the matched clusters, so it requires
+`--cluster`; `+A`-only arms are therefore `opt1`. Prep must run before the arm, and builds documents + embeddings for
 every namespace at once:
 
 ```bash
@@ -223,61 +223,32 @@ produce the selected SQL at
 `log_<ds><suffix>/sql_selection/final/<instance>/selected.sql`, with the
 executed rows beside it in `result.csv`.
 
-Step 12 calls `export_results.py`, which is **not shipped** — it scores the
-arm and writes into `csvs/nl2sql_<ds>.csv`, so it lives with the analysis
-scripts. Upstream AutoLink ships no evaluator of its own, so scoring an arm
-means either restoring that script or scoring
-`selected.sql` yourself. Note it does **not** use `compare_sql`: see
-[Scoring](#scoring).
+Step 12 calls `export_results.py`, which writes the SQL and its score into
+`csvs/nl2sql_<ds>.csv`. AutoLink is scored with **its own comparator** —
+`compare_pandas_table` from upstream's `sql_selection.py`, imported rather than
+reimplemented — and nothing else: no `compare_sql`, and no union of the two.
+See [Scoring](#scoring).
 
-### DeepEye-SQL
+`score_shipped.py` reports the same metric straight from the log directories,
+without needing the CSV, and `final_export_and_stats.py` does the export plus
+the McNemar grid in one pass. Two verification helpers ship alongside:
+`integrity_check.py` (every arm complete, non-empty, executable) and
+`audit_compare.py` / `audit_retrieval.sh` (each arm's retrieval really is the
+pristine top-*n*; see the note on retrieval state below).
 
-Vendored from [HKUSTDial/DeepEye-SQL](https://github.com/HKUSTDial/DeepEye-SQL).
-Config-driven rather than flag-driven, with its own Python env
-(`pyproject.toml` / `uv.lock`).
-
-```bash
-cd benchmarks/DeepEye-SQL
-cp config/template/ldd/config-ldd-spider.toml config/local/ldd/my-arm.toml
-# edit: [llm_profiles] model/base_url/api_key, [embedding], and
-#       [dataset] ldd_arm_name = base | rap_opt1 | rap_opt2
-export CONFIG_PATH=config/local/ldd/my-arm.toml
-bash script/run_ldd_spider_all.sh
-```
-
-The shipped templates carry **placeholder** URLs and default to a self-hosted
-Qwen3-Coder-30B plus Qwen3-Embedding-0.6B; point them at whatever you have.
-`config/local/` is gitignored — keep keys there, never in `template/`.
-`[dataset] max_samples = N` caps the row count.
-
-| File | Role |
-|---|---|
-| `app/ldd/` | arm config, history loading, object scope, rename map |
-| `app/pipeline/apr/apr_injection.py` | stage 5.5 — injects +A views and +P clusters after linking |
-| `app/dataset/ldd_dataset.py` | the `type = "ldd"` dataset adapter |
-| `runner/run_schema_linking_phase_{a,b}.py` | splits linking so few-shot prep can see the cluster |
-| `runner/run_value_retrieval_stub.py` | dry-run stand-in for value retrieval |
-
-**Two things that bite.** First, `rap_opt2` is **two-phase and order-sensitive**:
-phase A (direct + value linkers) → cluster-aware few-shot prep reading phase
-A's snapshot → delete that snapshot → phase B (reversed linker). Running
-few-shot prep *before* phase A makes the second call skip both items and emit
-a snapshot with examples but no linking, and phase B then fails validation on
-missing required fields. Second, real value retrieval indexes every TEXT
-column — 3.4M distinct values / ~21 GB on merged_bird — so use
-`run_value_retrieval_stub.py` for anything short of a full run, and note it
-contributes no value links.
-
-Scoring: upstream's own `runner/evaluation.py` and
-`runner/benchmark_execution.py` both ship. Our `export_ldd_results` — which
-writes into `csvs/nl2sql_<ds>.csv` — does not, and does not use `compare_sql`
-either; see [Scoring](#scoring).
+**Retrieval is stateful.** `retrieve_topk_schema.get_next_k_results` passes the
+arm's accumulated `cache/used_indices` as `excluded_indices`, so running step 1
+twice on the same log directory returns the *next* *n* columns instead of the
+top *n* — silently handing the arm a near-irrelevant schema. `run_arm.sh`
+therefore clears `cache/` and `status/` before retrieval and then asserts every
+instance consumed exactly `top_n`, failing the arm rather than spending API on
+it. Re-run an arm from the `gpu` phase, never by re-entering a populated one.
 
 ---
 
 ## Scoring
 
-**All six pipelines report the same strict EX**, from
+**The four flag-driven pipelines report the same strict EX**, from
 [`_common/evaluate.py`](_common/evaluate.py)'s `compare_sql`: execute both
 sides against the same database and compare **`set(predicted) == set(gold)`**,
 with a 15 s per-query timeout and raw bytes (`text_factory = bytes`). Any
@@ -295,17 +266,26 @@ predicted columns, with `math.isclose(abs_tol=1e-2)` on numbers. AutoLink's
 generation prompt is written for exactly that rule — *"the execution result can
 be more than what is required by the question, but it must not be less"* — so
 whole-result equality penalises predictions that answer the question and carry
-extra columns. It is reported *alongside* strict EX, never instead of it, and
-never applied to another pipeline.
+extra columns. **AutoLink's reported EX is that comparator alone** — not
+`compare_sql`, and not a union of the two. An earlier version reported
+`strict OR compare_pandas_table`, which credited rows the shipped comparator
+rejects (a prediction that adds `DISTINCT` has gold's row *set* but not gold's
+column-vector *length*), inflating BIRD-Union by ~2.6 points. `_result_lenient`
+is now the shipped comparator and nothing else; `_result` still carries
+`compare_sql` for reference, but the two must never be mixed in one table.
 
-Both exporters previously carried their own **strict** metric — multiset
-equality with row order enforced when gold had `ORDER BY`, on `str()`-coerced
-values — which made their EX incomparable with the other four. That is gone;
-there is one strict metric, defined in one place, and the lenient one calls
-upstream's function directly rather than a local copy. Re-scoring with
-`compare_sql` moves every arm **up**, by 0.8–2.0 points on Spider-Union and
-2.7–3.7 on BIRD-Union, because `set` collapses duplicate rows that multiset
-equality was failing on.
+They are not nested, and they rank arms differently. AutoLink tolerates extra
+columns, ignores column order, and allows float slack, but requires matching
+row *multiplicity*; `compare_sql` collapses duplicates but demands whole-row,
+exact, same-arity equality. On BIRD-Union `+A+P` leads on `compare_sql` (47.3%)
+while trailing on the shipped comparator (54.2%), and the `+R` arms invert that
+— so any AutoLink number has to name its rule.
+
+AutoLink's exporter also previously carried a **local strict** metric — multiset
+equality with row order enforced when gold had `ORDER BY` — which made its EX
+incomparable with the other four pipelines. That is gone; strict is defined in
+one place (`_common/evaluate.py`), and the lenient metric imports upstream's
+function rather than copying it.
 
 ---
 

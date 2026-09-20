@@ -34,8 +34,7 @@ over-join, and lexical ambiguity — together with the matching mitigation:
 
 ## Code
 
-The four NL2SQL pipelines (basesql, din-sql, csc_sql, MAC-SQL) plus the
-schema-prep script live under [`benchmarks/`](benchmarks/):
+The five NL2SQL pipelines (basesql, din-sql, csc_sql, MAC-SQL, AutoLink) plus the schema-prep script live under [`benchmarks/`](benchmarks/):
 
-- [`benchmarks/README.md`](benchmarks/README.md) — 4-step quick start + flag reference for all four pipelines
+- [`benchmarks/README.md`](benchmarks/README.md) — 4-step quick start + flag reference for all pipelines
 - [`benchmarks/PREP_DATABASE.md`](benchmarks/PREP_DATABASE.md) — schema-prep walkthrough (rename + cluster + view artifacts)

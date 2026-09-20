@@ -30,11 +30,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# Vendored under <LDD>/benchmarks/, so the repo root is derived from this
-# file's location rather than hardcoded -- the original absolute path only
-# worked on the machine the experiments were run on.
-LDD = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir, os.pardir))
-
+LDD = os.environ.get("LDD_ROOT") or os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 os.pardir, os.pardir, os.pardir))
 # Extracted verbatim from spider_data/run_spider.py; 8 lists, both datasets.
 OBJECT_LISTS = os.path.join(HERE, "object_lists.json")
 

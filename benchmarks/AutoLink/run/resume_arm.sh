@@ -8,7 +8,7 @@
 # the agent loop is regenerated from scratch, because postprocess/final schemas/
 # generation were built from an incomplete candidate set.
 set -u
-PY=D:/miniconda3/envs/openai-py39/python.exe
+PY="${PY:-python}"
 cd "$(dirname "$0")" || exit 1
 
 DS="${1:?dataset}"
