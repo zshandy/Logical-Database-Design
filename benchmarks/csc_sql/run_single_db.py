@@ -139,20 +139,25 @@ def main():
     if args.cluster_filter is None:
         args.cluster_filter = bool(args.cluster)
 
-    # Cluster precomputed file: re-use --mapping_path (the consolidated prep config
-    # holds both the rename mapping and the cluster section).
-    if args.cluster and not args.mapping_path:
+    # The consolidated prep config holds the rename mapping, the cluster section
+    # and the cluster-view pool, so any of --rename / --view / --cluster looks for
+    # it -- the file prep_database.py writes and create_database.py
+    # --recreate_benchmark installs. Only an existing file is used; without one
+    # the built-in table/view lists and history-built clusters apply.
+    _mapping_auto_new = False
+    if (args.cluster or args.rename or args.view) and not args.mapping_path:
         _here = os.path.dirname(os.path.abspath(__file__))
         _ldd_root = os.path.abspath(os.path.join(_here, "..", ".."))
         _suffix = "_renamed" if args.rename else ""
-        args.mapping_path = os.path.join(
-            _ldd_root, "mapping_files", f"prep_{args.dataset}{_suffix}.json"
-        )
-        if os.path.exists(args.mapping_path):
-            print(f"[csc_sql] --mapping_path auto-resolved to {args.mapping_path}")
+        _cand = os.path.join(_ldd_root, "mapping_files", f"prep_{args.dataset}{_suffix}.json")
+        if os.path.exists(_cand):
+            args.mapping_path = _cand
+            # --cluster always auto-resolved; --rename / --view alone now do too
+            _mapping_auto_new = not args.cluster
+            print(f"[csc_sql] --mapping_path auto-resolved to {_cand}")
         else:
-            print(f"[csc_sql] --mapping_path auto-resolved to {args.mapping_path} "
-                  f"(not found — will build clusters from history)")
+            print(f"[csc_sql] no {os.path.basename(_cand)} — using the built-in table/view lists"
+                  + (" and building clusters from history" if args.cluster else ""))
 
     # Auto-resolve csv_path / db_path / history_path from --dataset when not explicitly provided.
     # This script is expected to run from .../benchmarks/csc_sql/, so the shared data folders
@@ -198,6 +203,10 @@ def main():
             _pp._BIRD_MAPPING_PATH = args.mapping_path
         else:
             _pp._SPIDER_MAPPING_PATH = args.mapping_path
+        # Newly auto-resolved for --rename / --view: lists naming the same
+        # objects as the built-in ones keep the built-in order (what these arms
+        # always used), so their prompts are unchanged.
+        _pp._KEEP_BUILTIN_ORDER = _mapping_auto_new
         print(f"[run_single_db] --mapping_path override: {args.mapping_path}")
 
     # Auto-resolve column names from the mapping JSON's `columns` section so
@@ -374,13 +383,18 @@ def main():
         if args.max_model_len is not None:
             prepass_cmd += f" --max_model_len {args.max_model_len}"
         print(f"Running pre-pass: {prepass_cmd}")
+        from cscsql.utils.gpu_utils import gpu_used_mib, wait_for_gpu_release
+        _gpu_before = gpu_used_mib(args.visible_devices)
         _rc = os.system(prepass_cmd)
-    if _rc != 0:
-        # Previously the exit code was discarded, so a subprocess that
-        # never started (e.g. `python` absent from PATH) still let the
-        # run report success and produce no SQL.
-        print(f"ERROR: stage-1 pre-pass exited {_rc}; no predictions were "
-              f"produced.", file=sys.stderr)
+        # the main pipeline's Stage 1 is a fresh vLLM process: let the
+        # pre-pass's VRAM come back first
+        wait_for_gpu_release(_gpu_before, args.visible_devices)
+        if _rc != 0:
+            # Previously the exit code was discarded, so a subprocess that
+            # never started (e.g. `python` absent from PATH) still let the
+            # run report success and produce no SQL.
+            print(f"ERROR: stage-1 pre-pass exited {_rc}; falling back to "
+                  f"single-pass Stage 1.", file=sys.stderr)
 
         # Use pre-pass output as stage0_from for the main pipeline.
         prepass_stage1_file = os.path.join(prepass_run_dir, "sampling_think_table_link.json")

@@ -105,7 +105,7 @@ class ArmContext:
         self.questions_path = os.path.join(
             HERE, f"questions_{self.dataset}{self.suffix}.json")
 
-        self.hist = C.HISTORY_COLS[(self.dataset, self.rename)]
+        self.hist = C.history_cols(self.dataset, self.rename)
         self._sample: Optional[pd.DataFrame] = None
         self._refs = None
         self._paths: Optional[dict] = None

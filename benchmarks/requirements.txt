@@ -5,6 +5,9 @@
 # there; unpinned otherwise. Install with:
 #   pip install -r benchmarks/requirements.txt
 
+# torch below is the CUDA 12.6 build, which is served from PyTorch's index, not PyPI
+--extra-index-url https://download.pytorch.org/whl/cu126
+
 # ---- Core: used by _common (all 4 baselines + prep_database) ----
 openai==2.15.0
 google-genai==1.47.0

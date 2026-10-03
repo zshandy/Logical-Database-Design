@@ -169,6 +169,23 @@ def get_all_views(db_path: str) -> List[str]:
     return views
 
 
+def _rename_section(mapping: dict) -> dict:
+    """The ``table_to_view`` / ``column_mapping`` dict of a name mapping, whether
+    flat (name_mapping_*.json) or a consolidated prep JSON (under ``rename``)."""
+    if isinstance(mapping.get('rename'), dict) and 'table_to_view' in mapping['rename']:
+        return mapping['rename']
+    return mapping
+
+
+def _renamed_col(col_map: dict, col: str) -> str:
+    """Renamed name of original column ``col`` in a bird-style
+    {original: renamed} column map (case-insensitive); unchanged if absent."""
+    for orig_col, new_col in col_map.items():
+        if str(orig_col).lower() == col.lower():
+            return new_col
+    return col
+
+
 def generate_view_fk_string(db_path: str, views: List[str], mapping_path: str) -> str:
     """
     Generate FK string for views by mapping base table FKs to view names/columns.
@@ -185,7 +202,7 @@ def generate_view_fk_string(db_path: str, views: List[str], mapping_path: str) -
 
     # Load the mapping
     with open(mapping_path, 'r', encoding='utf-8') as f:
-        mapping = json.load(f)
+        mapping = _rename_section(json.load(f))
 
     table_to_view = mapping.get('table_to_view', {})
     column_mapping = mapping.get('column_mapping', {})
@@ -265,21 +282,24 @@ def generate_renamed_fk_string(db_path: str, renamed_tables: List[str], mapping_
     """
     Generate FK string for spider renamed tables.
 
-    Spider mapping format (inverted vs bird):
+    Mapping format:
         table_to_view:   {original_table: renamed_table}
-        column_mapping:  {renamed_table: {renamed_col: original_col}}
+        column_mapping:  {renamed_table: {original_col: renamed_col}}
+    (the shipped spider mapping and every prep_database.py output are in this
+    bird-style direction; older inverted spider files were migrated by
+    flip_spider_mapping.py).
 
     Strategy: for each renamed table, find its base table, PRAGMA its FKs,
-    then map the FK columns (which are in original naming) back to renamed
-    column names via reverse-lookup in column_mapping.
+    then map the FK columns (which are in original naming) to renamed
+    column names via column_mapping.
     """
     import json
 
     with open(mapping_path, 'r', encoding='utf-8') as f:
-        mapping = json.load(f)
+        mapping = _rename_section(json.load(f))
 
     table_to_renamed = mapping.get('table_to_view', {})  # {orig_table: renamed_table}
-    column_mapping = mapping.get('column_mapping', {})   # {renamed_table: {renamed_col: orig_col}}
+    column_mapping = mapping.get('column_mapping', {})   # {renamed_table: {orig_col: renamed_col}}
 
     # Reverse: renamed_table -> orig_table (case-insensitive)
     renamed_to_table = {v.lower(): k for k, v in table_to_renamed.items()}
@@ -316,21 +336,8 @@ def generate_renamed_fk_string(db_path: str, renamed_tables: List[str], mapping_
             if not to_renamed or to_renamed.lower() not in renamed_set_lower:
                 continue
 
-            # Reverse-lookup renamed column names (inner dict is {renamed_col: orig_col})
-            from_col_map = column_mapping.get(renamed_name, {})
-            to_col_map = column_mapping.get(to_renamed, {})
-
-            mapped_from_col = from_col
-            for renamed_col, orig_col in from_col_map.items():
-                if str(orig_col).lower() == from_col.lower():
-                    mapped_from_col = renamed_col
-                    break
-
-            mapped_to_col = to_col
-            for renamed_col, orig_col in to_col_map.items():
-                if str(orig_col).lower() == to_col.lower():
-                    mapped_to_col = renamed_col
-                    break
+            mapped_from_col = _renamed_col(column_mapping.get(renamed_name, {}), from_col)
+            mapped_to_col = _renamed_col(column_mapping.get(to_renamed, {}), to_col)
 
             fk_str = f"{renamed_name}.`{mapped_from_col}` = {to_renamed}.`{mapped_to_col}`"
             if fk_str not in all_fk_strings:
@@ -341,8 +348,10 @@ def generate_renamed_fk_string(db_path: str, renamed_tables: List[str], mapping_
 
 
 if __name__ == "__main__":
-    # Example usage
-    db_path = "D:\WORK\PhD\column retrieval\exp\merged_schema_fk.sqlite"
+    # Example usage: the merged BIRD database create_database.py builds
+    import os
+    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "..", "..", "..", "databases", "merged_bird.sqlite")
     tables = get_all_tables(db_path)
     print(f"Tables found: {tables}")
 

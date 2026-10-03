@@ -1,346 +1,193 @@
 # Benchmarks
 
-Five NL2SQL pipelines evaluated under the same three schema transformations.
-Each takes a question CSV + a merged SQLite database and writes predictions
-plus per-question prompt logs.
-
-| Pipeline | Entry point | Strategy | LLM |
-|---|---|---|---|
-| **basesql** | [basesql/basesql.py](basesql/basesql.py) | link → generate → revise | API |
-| **din-sql** | [din-sql/dinsql.py](din-sql/dinsql.py) | link → classify (easy/non-nested/nested) → generate → self-correct | API |
-| **MAC-SQL** | [MAC-SQL/run_union.py](MAC-SQL/run_union.py) | Selector → Decomposer → Refiner (multi-agent) | API |
-| **csc_sql** | [csc_sql/run_single_db.py](csc_sql/run_single_db.py) | sampling + merge/correction | local vLLM |
-| **AutoLink** | [AutoLink/run/run_arm.sh](AutoLink/run/run_arm.sh) | agentic schema completion → candidates → selection | DeepSeek API |
-
-The first four share one CLI surface and are run from their own folder.
-AutoLink is a vendored upstream repo with our integration layered on; it keeps
-its own multi-step driver — see [AutoLink](#autolink).
-
-The three transformations map to the paper's operators:
-
-| Flag | Paper name | Effect |
-|---|---|---|
-| `--rename` | Schema Renaming (**+R**) | LLM-renamed tables/columns, to resolve lexical ambiguity |
-| `--view` | Schema Abstraction (**+A**) | inject pre-computed multi-table views, so the model skips complex joins |
-| `--cluster` | Schema Partitioning (**+P**) | prune the prompt schema to a workload-mined partition |
-
----
-
-## Layout
-
-```
-Logical-Database-Design/
-├── csvs/                  nl2sql_<ds>.csv (eval) + sample_<ds>.csv (history)
-├── databases/             merged_<ds>.sqlite            (gitignored)
-├── mapping_files/         prep_<ds>[_renamed].json       (gitignored)
-└── benchmarks/
-    ├── _common/           LLM clients, schema builder, clusters, FK graph
-    ├── create_database.py  step 0 — build the union DB
-    ├── prep_database.py    step 1 — rename + clusters + views
-    ├── recreate_database/  shipped view layer, CSVs, mapping
-    ├── basesql/  din-sql/  MAC-SQL/  csc_sql/
-    └── AutoLink/
-```
-
-Paths resolve from `--dataset` relative to the LDD root, so the shared data
-folders need no arguments.
-
----
+Five text-to-SQL pipelines, run on the original schema and on the paper's
+optimized schema.
 
 ## Quick start
 
-**1. Build the union database.** The benchmarks ship one SQLite file per
-database; every experiment runs against a single union of all of them. Bring
-your own BIRD dev / Spider dev download — `databases/` is gitignored.
-
-```bash
-cd benchmarks
-python create_database.py --dataset bird \
-    --src ../databases/bird_base_databases \
-    --out ../databases/merged_bird.sqlite \
-    --recreate_benchmark recreate_database/bird_benchmark_views.sql
-```
-
-`--recreate_benchmark` replays the paper's exact view layer, so you skip the
-LLM prep entirely. Full detail: **[PREP_DATABASE.md](PREP_DATABASE.md)**.
-
-**2. Or generate your own schema prep** (one-time per database + history):
-
-```bash
-python prep_database.py --db_path ../databases/merged_bird.sqlite \
-    --history_path ../csvs/sample_bird.csv --rename --cluster --view
-```
-
-**3. Install and set a key.**
+You need Python 3.9, an OpenAI API key, and the BIRD dev databases
+([bird-bench.github.io](https://bird-bench.github.io/) → `dev.zip` →
+`dev_databases/`).
 
 ```bash
 pip install -r benchmarks/requirements.txt
-export OPENAI_API_KEY=sk-...     # GEMINI_API_KEY for gemini-*, DEEPSEEK_API_KEY for AutoLink
+export OPENAI_API_KEY=sk-...
 ```
 
-No keys are embedded in code; all are read via `os.environ`.
+Then run two commands from the repository root:
 
-**4. Run a pipeline with all three operators.**
+```bash
+# 1. Build the merged BIRD database with the paper's optimized schema
+python benchmarks/create_database.py --dataset bird --src /path/to/dev_databases --out databases/merged_bird.sqlite --recreate_benchmark benchmarks/recreate_database/bird_benchmark_views.sql
+
+# 2. Run BaseSQL with all three transformations on the first 20 questions
+cd benchmarks/basesql && python basesql.py --dataset bird --history --rename --view --cluster --rows 20
+```
+
+Step 1 merges the 11 BIRD databases into one file and adds the optimized
+schema as views. It also copies the question sets and mapping files into
+`csvs/` and `mapping_files/`. It makes no LLM calls. In step 2, drop
+`--rows 20` to run all 767 questions.
+
+For Spider, download `spider.zip` from
+[yale-lily.github.io/spider](https://yale-lily.github.io/spider) and change
+step 1 to `--dataset spider --src /path/to/spider/database --out
+databases/merged_spider.sqlite --recreate_benchmark
+benchmarks/recreate_database/spider_benchmark_views.sql`. Then use
+`--dataset spider` in step 2.
+
+To build an optimized schema for your own database, see
+**[PREP_DATABASE.md](PREP_DATABASE.md)**.
+
+## Configurations
+
+Every pipeline takes the same three flags. Leave all three off for the
+baseline.
+
+| Flag | Paper | Effect |
+|---|---|---|
+| `--view` | +A, Schema Abstraction | adds views that pre-join tables, so the model can skip joins |
+| `--cluster` | +P, Schema Partitioning | narrows the schema to the tables the workload uses together |
+| `--rename` | +R, Schema Renaming | uses the renamed tables and columns |
+
+`--history` adds the three most similar history questions as examples. Every
+run in the paper uses it.
+
+## Output
+
+- Each run adds its SQL and an EX column (`..._result`, 1 = correct) to
+  `csvs/nl2sql_<ds>.csv`. The column names show the pipeline and the flags,
+  e.g. `basesql_revised_sql_rename_withview_clusterfilter_history`.
+- EX is printed at the end of the run.
+- The prompts and responses for each question are saved under
+  `logs/<pipeline>/<ds>/`.
+
+## Pipelines
+
+Run each pipeline from its own folder. The commands below run BIRD with all
+three transformations. Change the flags for other configurations.
+
+### BaseSQL
+
+Links tables, generates SQL, then revises it. Needs `OPENAI_API_KEY`.
 
 ```bash
 cd benchmarks/basesql
-python basesql.py --dataset bird --rename --view --cluster --history
+python basesql.py --dataset bird --history --rename --view --cluster
 ```
 
-Swap the folder and entry point for din-sql or MAC-SQL (which needs
-`--output_file`). Add `--rows 20` for a smoke test.
+### DIN-SQL
 
----
+Links tables, classifies the question, generates SQL, then self-corrects.
+Needs `OPENAI_API_KEY`.
 
-## Common flags
-
-Shared by basesql, din-sql, MAC-SQL and csc_sql, with identical names and
-semantics. Bool toggles are `--flag` / `--no-flag`, never `--flag true`.
-Defined in [`_common/cli_common.py`](_common/cli_common.py).
-
-| Flag | Default | Purpose |
-|---|---|---|
-| `--dataset` | `spider` | `spider`, `bird`, or the BEAVER splits `dw`/`neutron`/`nova`. Drives default paths, table/view lists, log dir. |
-| `--model` | `gpt-4.1-mini` | Names starting with `gemini` route to Google GenAI, else OpenAI. |
-| `--csv_path` / `--db_path` | auto | Eval CSV / SQLite DB. |
-| `--rows` | all | `N` = first N, `START:END` = half-open slice. |
-| `--question_col` / `--sql_col` | auto | Read from the prep JSON's `columns` section if present. |
-| `--rename` | off | +R. `--rename_v VAR` overrides the table list. |
-| `--view` | off | +A. `--view_v VAR` overrides the pool. |
-| `--cluster` | off | +P. Injects matched clusters' join paths and restricts history retrieval to cluster questions. Requires history. |
-| `--cluster_filter` | **on with `--cluster`** | Also restricts the stage-2/3 schema to the cluster's tables. Pass `--no-cluster_filter` to inject join paths without pruning — that A/B is a real distinction, and which one the paper reports varies by pipeline and dataset. |
-| `--history` | off | Top-K retrieval from `sample_<ds>.csv`. `--history_path FILE` implies it. Embedded with BGE-large-en-v1.5; K=3. |
-| `--sample` | 100 | Percent of history to use. `<100` sub-samples at seed 42 **and** auto-maps the `_N` table/view/mapping variants. |
-| `--use_linking COL` | none | Read stage-1 links from a CSV column and skip the linking call. How every published arm was run. |
-| `--mapping_path` | auto | Prep JSON (`prep_<ds>[_renamed].json`). Also accepts flat legacy `name_mapping_*.json`. |
-| `--per_db` | off | Restrict schema, views, clusters and retrieval to each question's `db_id`. |
-
-Two `--view` variants build views on demand instead of using the pool, both
-requiring `--use_linking`: `--view_adhoc` (LLM writes a fresh `CREATE VIEW`
-per question) and `--view_relink` (match pool views, inject, re-run stage 1).
-
-**Auto-resolved paths** — `csvs/nl2sql_{ds}.csv`,
-`databases/merged_{ds}.sqlite`, `csvs/sample_{ds}.csv` (with `--history`),
-`mapping_files/prep_{ds}[_renamed].json` (with `--rename`/`--cluster`). With
-`--sample N`, each picks up its `_N` variant, along with `--rename_v` →
-`{ds}_renamed_tables_{N}` and `--view_v` → `{ds}_{org,renamed}_views_{N}`.
-Available variants are whatever exists in
-[`_common/datasets.py`](_common/datasets.py) — currently `0` and `50`.
-
----
-
-## Outputs
-
-basesql and din-sql append columns to a copy of the input CSV; MAC-SQL writes
-JSONL; csc_sql writes to `outputs/{dataset}/`. Per-question prompt logs go to
-`logs/<pipeline>/<dataset>/run_<timestamp><suffix>/qNNNN.log`.
-
-| Column | Contains |
-|---|---|
-| `linking{suffix}` | stage-1 links (or the `--use_linking` column verbatim) |
-| `sql{suffix}` | generated SQL |
-| `revised_sql{suffix}` | revised SQL — the final answer |
-
-`{suffix}` encodes the flag combination (e.g.
-`_rename_withview_clusterfilter_history_top3`) so configurations don't
-collide. din-sql adds `dinsql_*` equivalents plus `dinsql_label{suffix}`.
-
----
-
-## Pipeline notes
-
-### basesql / din-sql
-
-No extra flags. Prompts in [basesql/prompts.py](basesql/prompts.py) and
-[din-sql/prompts.py](din-sql/prompts.py).
+```bash
+cd benchmarks/din-sql
+python dinsql.py --dataset bird --history --rename --view --cluster
+```
 
 ### MAC-SQL
 
-| Flag | Purpose |
-|---|---|
-| `--output_file` | required — JSONL output path |
-| `--fresh` | ignore prior output instead of resuming |
-| `--without_selector` | Decomposer sees the full schema |
-| `--linking_source` | `selector` (default) · `gold` · `disk` |
-| `--linking_filename` | required with `disk` |
+Three agents: Selector, Decomposer and Refiner. Needs `OPENAI_API_KEY`.
 
-`selector` is the honest default: it runs the Selector once on the full schema
-as a pre-pass and takes its picked tables, costing one extra call per row and
-leaking nothing. `gold` reads `gt_tables` and is for smoke tests only. `disk`
-loads a pre-computed linking JSON — four ship here:
-`history_linking.json` / `workload_updated_history_linking.json` (BIRD, org /
-+R) and `history_linking_spider.json` /
-`renamed_history_linking_spider.json` (Spider). Those files are what the
-published runs read, from a time when disk-loading was the only behaviour, so
-`disk` is the path to bit-exact reproduction; `selector` re-links live and will
-land near but not on the reported numbers.
+```bash
+cd benchmarks/MAC-SQL
+python run_union.py --dataset bird --history --rename --view --cluster
+```
 
-### csc_sql
+It also writes a JSONL file to `outputs/MAC-SQL/<ds>/`. By default the
+Selector picks the tables. To use the table links the paper's runs used, add
+`--linking_source disk --linking_filename <file>` with one of the shipped
+files: `history_linking.json` (BIRD), `workload_updated_history_linking.json`
+(BIRD, +R), `history_linking_spider.json` (Spider) or
+`renamed_history_linking_spider.json` (Spider, +R).
 
-Sampling-and-merge over a local or remote vLLM server. Requires the three
-model flags: `--model_table_link`, `--model_sql_generate`,
-`--model_sql_merge` (typically a Qwen2.5-Coder-7B checkpoint).
+### CSC-SQL
 
-| Group | Flags |
-|---|---|
-| Sampling | `--n_table_link` 4 · `--n_sql_generate` 8 · `--n_sql_merge` 4 · matching `--temperature_*` 0.8 · `--history_k` 3 · `--prompt_name` `think` · `--value_limit_num` 2 · `--seed` 42 |
-| vLLM | `--visible_devices` · `--tensor_parallel_size` · `--gpu_memory_utilization` 0.90 · `--quantization` `bitsandbytes` · `--api_base_generate` / `--api_base_merge` for a remote server |
-| Resume | `--stage1_from` `auto` · `--stage0_from` · `--skip_preprocess` · `--input_file` |
-| Eval | `--run_eval` · `--eval_step` · `--eval_mode` `major_voting` · `--output_dir` · `--run_time` |
+Samples several SQL candidates with local models, then merges them. Needs
+Linux (or WSL), a GPU and vLLM. Install it once:
+
+```bash
+cd benchmarks/csc_sql
+pip install -r requirements.txt && pip install -e .
+```
+
+Then run:
+
+```bash
+python run_single_db.py --dataset bird --history --rename --view --cluster \
+    --model_table_link cycloneboy/CscSQL-Grpo-Qwen2.5-Coder-7B-Instruct \
+    --model_sql_generate cycloneboy/CscSQL-Grpo-Qwen2.5-Coder-7B-Instruct \
+    --model_sql_merge cycloneboy/CscSQL-Merge-Qwen2.5-Coder-7B-Instruct
+```
+
+On a smaller GPU, use the 3B models with `--quantization fp8` and a lower
+`--gpu_memory_utilization`. Intermediate files go to `outputs/csc_sql/<ds>/`.
 
 ### AutoLink
 
-Vendored from [wzy416/AutoLink](https://github.com/wzy416/AutoLink). Agentic
-schema completion: an LLM iteratively calls retrieval / SQL-execution tools to
-grow an initially incomplete schema, then generates candidates and selects by
-execution majority. Needs `DEEPSEEK_API_KEY` (V3 for the agent loop, R1 for
-candidates) and a GPU for BGE retrieval.
-
-Our integration lives alongside upstream's `run/` scripts:
-
-| File | Role |
-|---|---|
-| `ldd_config.py` | the six arms and their column/namespace choices |
-| `ldd_runtime.py` | the history-SQL and common-join-path prompt blocks AutoLink has no notion of |
-| `prep_ldd_inputs.py` | dumps the exposed object universe + question file per arm |
-| `apply_apr.py` | injects +A views and +P cluster tables/join paths between retrieval and the agent loop |
-| `object_lists.json` | the org / renamed / view object universe per dataset |
-
-Arms are `base`, `a` (+A), `p` (+P), `opt1`/`opt2` (+A+P) and their `--rename`
-twins `rbase`, `ar`, `pr`, `ropt1`/`ropt2` — eight published configurations
-per dataset. `opt2` re-retrieves inside the matched clusters, so it requires
-`--cluster`; `+A`-only arms are therefore `opt1`. Prep must run before the arm, and builds documents + embeddings for
-every namespace at once:
+An agent grows the schema step by step, then generates and selects SQL. Needs
+`DEEPSEEK_API_KEY` and a GPU. Install `AutoLink/requirements.txt` first.
 
 ```bash
 cd benchmarks/AutoLink/run
-./prep_all.sh spider              # add a row cap as a 2nd arg for a pilot
-./run_arm.sh  spider ropt2        # +A+P+R
+./prep_all.sh bird        # once per dataset; add a number (e.g. 20) to use only that many questions
+./run_arm.sh bird apr     # +A+P+R
 ```
 
-`run_arm.sh` writes to `run/log_<ds><suffix>/` (gitignored). Steps 1–11
-produce the selected SQL at
-`log_<ds><suffix>/sql_selection/final/<instance>/selected.sql`, with the
-executed rows beside it in `result.csv`.
+The arms are `base`, `a`, `p`, `r`, `ap`, `ar`, `pr` and `apr`, one per
+configuration. `run_arm.sh` writes the SQL and EX into `csvs/nl2sql_<ds>.csv`
+when it finishes.
 
-Step 12 calls `export_results.py`, which writes the SQL and its score into
-`csvs/nl2sql_<ds>.csv`. AutoLink is scored with **its own comparator** —
-`compare_pandas_table` from upstream's `sql_selection.py`, imported rather than
-reimplemented — and nothing else: no `compare_sql`, and no union of the two.
-See [Scoring](#scoring).
+## Common flags
 
-`score_shipped.py` reports the same metric straight from the log directories,
-without needing the CSV, and `final_export_and_stats.py` does the export plus
-the McNemar grid in one pass. Two verification helpers ship alongside:
-`integrity_check.py` (every arm complete, non-empty, executable) and
-`audit_compare.py` / `audit_retrieval.sh` (each arm's retrieval really is the
-pristine top-*n*; see the note on retrieval state below).
+BaseSQL, DIN-SQL, MAC-SQL and CSC-SQL share these flags.
 
-**Retrieval is stateful.** `retrieve_topk_schema.get_next_k_results` passes the
-arm's accumulated `cache/used_indices` as `excluded_indices`, so running step 1
-twice on the same log directory returns the *next* *n* columns instead of the
-top *n* — silently handing the arm a near-irrelevant schema. `run_arm.sh`
-therefore clears `cache/` and `status/` before retrieval and then asserts every
-instance consumed exactly `top_n`, failing the arm rather than spending API on
-it. Re-run an arm from the `gpu` phase, never by re-entering a populated one.
+| Flag | Default | Meaning |
+|---|---|---|
+| `--dataset` | `spider` | `bird` or `spider` (BEAVER: `dw`, `neutron`, `nova`) |
+| `--rows` | all | `20` runs the first 20 questions; `100:200` runs a slice |
+| `--model` | `gpt-4.1-mini` | models named `gemini-*` use `GEMINI_API_KEY` |
+| `--history` | off | add the retrieved history examples |
+| `--no-cluster_filter` | — | with `--cluster`: add the cluster's join paths but keep the full schema |
+| `--csv_path`, `--db_path`, `--mapping_path` | auto | override the default file locations |
 
----
+Run any entry point with `--help` for the full list. The shared flags are
+defined in [`_common/cli_common.py`](_common/cli_common.py).
 
 ## Scoring
 
-**The four flag-driven pipelines report the same strict EX**, from
-[`_common/evaluate.py`](_common/evaluate.py)'s `compare_sql`: execute both
-sides against the same database and compare **`set(predicted) == set(gold)`**,
-with a 15 s per-query timeout and raw bytes (`text_factory = bytes`). Any
-execution error or timeout scores 0. Gold is always the original-namespace
-`SQL` column — renamed tables and cluster views are views over the same rows,
-so the reference result set is unchanged.
+BaseSQL, DIN-SQL, MAC-SQL and CSC-SQL use `compare_sql` in
+[`_common/evaluate.py`](_common/evaluate.py). It runs the predicted and the
+gold SQL on the same database. They match when they return the same set of
+rows. Errors and timeouts (15 s) count as wrong.
 
-**AutoLink additionally reports a lenient metric**, and only AutoLink does.
-That metric is not ours: it is `compare_pandas_table` in
-[AutoLink/run/sql_selection.py](AutoLink/run/sql_selection.py), shipped
-upstream and originally Spider 2.0's official comparator (AutoLink targets
-Spider2.0-Lite). It transposes both results to column vectors and requires
-every *gold* column to match some *predicted* column, tolerating extra
-predicted columns, with `math.isclose(abs_tol=1e-2)` on numbers. AutoLink's
-generation prompt is written for exactly that rule — *"the execution result can
-be more than what is required by the question, but it must not be less"* — so
-whole-result equality penalises predictions that answer the question and carry
-extra columns. **AutoLink's reported EX is that comparator alone** — not
-`compare_sql`, and not a union of the two. An earlier version reported
-`strict OR compare_pandas_table`, which credited rows the shipped comparator
-rejects (a prediction that adds `DISTINCT` has gold's row *set* but not gold's
-column-vector *length*), inflating BIRD-Union by ~2.6 points. `_result_lenient`
-is now the shipped comparator and nothing else; `_result` still carries
-`compare_sql` for reference, but the two must never be mixed in one table.
-
-They are not nested, and they rank arms differently. AutoLink tolerates extra
-columns, ignores column order, and allows float slack, but requires matching
-row *multiplicity*; `compare_sql` collapses duplicates but demands whole-row,
-exact, same-arity equality. On BIRD-Union `+A+P` leads on `compare_sql` (47.3%)
-while trailing on the shipped comparator (54.2%), and the `+R` arms invert that
-— so any AutoLink number has to name its rule.
-
-AutoLink's exporter also previously carried a **local strict** metric — multiset
-equality with row order enforced when gold had `ORDER BY` — which made its EX
-incomparable with the other four pipelines. That is gone; strict is defined in
-one place (`_common/evaluate.py`), and the lenient metric imports upstream's
-function rather than copying it.
-
----
+AutoLink uses its own comparator, `compare_pandas_table` in
+[`AutoLink/run/sql_selection.py`](AutoLink/run/sql_selection.py), which its
+prompt is written for. Its EX column ends in `_result_lenient`.
 
 ## Datasets
 
-`spider` and `bird` are wired end-to-end. Each defines, in
-[`_common/datasets.py`](_common/datasets.py): `org_tables`, `renamed_tables`,
-`org_views`, `renamed_views`, their `_0`/`_50` sampled variants, and a
-`db_dict` of `db_id → tables` for `--per_db`. Add a dataset by appending to
-`DATASET_TABLES`.
+| | Databases | Tables | Test / history questions |
+|---|---|---|---|
+| BIRD-Union | 11 | 75 | 767 / 767 |
+| Spider-Union | 19 | 78 | 502 / 502 |
 
-| | Databases | Tables | Rows | FK edges | Eval / history |
-|---|---|---|---|---|---|
-| BIRD-Union | 11 | 75 | 3,932,735 | 105 | 767 / 767 |
-| Spider-Union | 19 | 78 | 539,844 | 63 | 502 / 502 |
+The BEAVER splits (`dw`, `neutron`, `nova`) run on MySQL. Set `MYSQL_HOST`,
+`MYSQL_PORT`, `MYSQL_USER` and `MYSQL_PASSWORD`, or point `MYSQL_ENV_FILE` at
+a `.env` file. Then run e.g. `python basesql.py --dataset dw --history`.
+`--rename` and `--view` need `prep_database.py` to be run on the split first.
 
-### BEAVER splits (MySQL)
+## Files
 
-`dw`, `neutron`, `nova` are the three [BEAVER](https://arxiv.org/abs/2409.02038)
-enterprise databases. They differ in three ways: each is standalone (no merge,
-`--per_db` inapplicable); they live in **MySQL**, so `--db_path` resolves to
-`mysql://<name>` and everything goes through
-[`_common/db_backend.py`](_common/db_backend.py) with MySQL-dialect prompts;
-and `--rename` / `--view` are unsupported until `prep_database.py` has been
-run for a split.
+| Path | Contents |
+|---|---|
+| `create_database.py` | builds the merged database; `--recreate_benchmark` adds the paper's optimized schema |
+| `prep_database.py` | builds an optimized schema for a new database ([PREP_DATABASE.md](PREP_DATABASE.md)) |
+| `recreate_database/` | the paper's optimized schema (`*_benchmark_views.sql`), question sets and mapping files |
+| `_common/` | code the pipelines share: flags, schema prompts, clusters, scoring |
+| `basesql/`, `din-sql/`, `MAC-SQL/`, `csc_sql/`, `AutoLink/` | the five pipelines |
 
-| Split | Tables | Test | History | Declared FKs |
-|---|---|---|---|---|
-| `dw` | 97 | 2,894 | 2,893 | none |
-| `neutron` | 175 | 509 | 508 | 163 |
-| `nova` | 109 | 527 | 526 | 25 |
-
-CSVs are built from BEAVER's `dev.json` with a 50/50 split at seed 40. Every
-field is retained, but nothing feeds `domain_knowledge` into a prompt — these
-are BEAVER's hint-free `setting=0`.
-
-Credentials come from `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` /
-`MYSQL_PASSWORD` (the names BEAVER's own evaluator uses). Process environment
-wins; gaps fill from `MYSQL_ENV_FILE`, then `<LDD_ROOT>/.env`.
-
-```bash
-export MYSQL_ENV_FILE=/path/to/beaver/.env
-pip install pymysql
-python basesql.py --dataset dw --history
-```
-
-An explicit URI bypasses the environment: `--db_path "mysql://user:pass@host:3306/dw"`.
-
----
-
-## See also
-
-- [PREP_DATABASE.md](PREP_DATABASE.md) — building the database and the schema-prep phases
-- [`_common/cli_common.py`](_common/cli_common.py) — shared argparse and path resolution
-- [`_common/datasets.py`](_common/datasets.py) — every static table/view list
-- [`_common/clusters.py`](_common/clusters.py) — frequent-pattern clustering
-- [`_common/history.py`](_common/history.py) — history clusters from CSV
-- [`_common/adhoc_view.py`](_common/adhoc_view.py) — LLM-designed views
+These folders are created at the repository root: `databases/` (merged
+SQLite files), `csvs/` (question sets, where results are written),
+`mapping_files/` (rename and view lists), `logs/` and `outputs/`.

@@ -11,11 +11,11 @@ unchanged.
 
 Three composable transformations cover the three failure modes:
 
-- **Schema Abstraction** (`--view`) — pre-computed multi-table views that let
-  the model bypass complex joins
-- **Schema Partitioning** (`--cluster`) — workload-mined table clusters that
-  prune contextual noise from the prompt schema
-- **Schema Renaming** (`--rename`) — LLM-rewritten table/column names that
+- **Schema Abstraction** (+A, `--view`) — pre-computed multi-table views that
+  let the model bypass complex joins
+- **Schema Partitioning** (+P, `--cluster`) — workload-mined table clusters
+  that prune contextual noise from the prompt schema
+- **Schema Renaming** (+R, `--rename`) — LLM-rewritten table/column names that
   resolve lexical ambiguity between question and schema
 
 ![Pipeline](imgs/pipeline.png)
@@ -34,7 +34,12 @@ over-join, and lexical ambiguity — together with the matching mitigation:
 
 ## Code
 
-The five NL2SQL pipelines (basesql, din-sql, csc_sql, MAC-SQL, AutoLink) plus the schema-prep script live under [`benchmarks/`](benchmarks/):
+The repository ships the paper's question splits and its optimized schema, so
+the experiments run without any LLM schema-prep calls. Five text-to-SQL
+pipelines are included: BaseSQL, DIN-SQL, MAC-SQL, CSC-SQL and AutoLink.
 
-- [`benchmarks/README.md`](benchmarks/README.md) — 4-step quick start + flag reference for all pipelines
-- [`benchmarks/PREP_DATABASE.md`](benchmarks/PREP_DATABASE.md) — schema-prep walkthrough (rename + cluster + view artifacts)
+- [`benchmarks/README.md`](benchmarks/README.md) — start here: build the
+  database with the paper's schema, run a pipeline, and notes for each pipeline
+- [`benchmarks/PREP_DATABASE.md`](benchmarks/PREP_DATABASE.md) — how the
+  database and the optimized schema are built, what the shipped files contain,
+  and how to build an optimized schema for your own database

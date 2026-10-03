@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Run one LDD arm end-to-end through AutoLink (schema linking + SQL generation).
 #
-#   ./run_arm.sh <dataset> <arm> [limit]
-#     dataset : bird | spider
-#     arm     : base | opt1 | opt2
-#     limit   : optional question cap (pilot); omit for the full set
+#   ./run_arm.sh <dataset> <arm> [phase] [agent_procs]
+#     dataset     : bird | spider
+#     arm         : base | a | p | r | ap | ar | pr | apr  (the paper's eight configs)
+#                   also opt1 | opt2 | rbase | ropt1 | ropt2
+#     phase       : gpu | api | all (default all)
+#     agent_procs : processes in the agent loop (default 2)
+#   The question set (and any pilot cap) is fixed by prep_all.sh.
 #
 # Documents + embeddings are built once for ALL arms by prep_all.sh, because
 # generate_docs.py / embedding_docs.py rebuild every db_name namespace at once.
@@ -41,6 +44,10 @@ case "$ARM" in
   p)     FLAGS="--cluster --mode opt2" ;;
   ar)    FLAGS="--rename --view --mode opt1" ;;
   pr)    FLAGS="--rename --cluster --mode opt2" ;;
+  # config-named aliases; +A+P and +A+P+R use opt2, the mode the paper reports
+  r)     FLAGS="--rename" ;;
+  ap)    FLAGS="--view --cluster --mode opt2" ;;
+  apr)   FLAGS="--rename --view --cluster --mode opt2" ;;
   *) echo "unknown arm $ARM"; exit 1 ;;
 esac
 

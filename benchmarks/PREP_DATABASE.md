@@ -90,9 +90,10 @@ Everything below is in [`recreate_database/`](recreate_database/):
 |---|---|
 | `bird_benchmark_views.sql` | 203 `CREATE VIEW` — 75 renamed tables + 64 org + 64 renamed |
 | `spider_benchmark_views.sql` | 192 — 78 renamed tables + 57 org + 57 renamed |
-| `name_mapping_{bird,spider}.json` | `table_to_view`, `column_mapping`, `columns` |
-| `sample_{bird,spider}_min.csv` | history pool — 767 × 11 / 502 × 8 |
-| `nl2sql_{bird,spider}_min.csv` | eval set + published predictions — 767 × 105 / 502 × 102 |
+| `name_mapping_{bird,spider}.json` | +R prep JSON — `table_to_view`, `column_mapping`, `columns`, and `view.cluster_views` (the 64 / 57 renamed cluster views) |
+| `prep_{bird,spider}.json` | original-namespace prep JSON — `columns` and `view.cluster_views` (the 64 / 57 original cluster views) |
+| `sample_{bird,spider}.csv` | history pool — 767 × 11 / 502 × 8 |
+| `nl2sql_{bird,spider}.csv` | evaluation set — 767 × 7 / 502 × 4 |
 
 The `.sql` files are emitted in dependency order with per-family banners:
 renamed tables and mined views read the base tables, and the renamed cluster
@@ -116,14 +117,41 @@ python create_database.py --dataset bird \
 
 Step 3 also accepts an existing `--out` with no `--src`, replaying the view
 layer onto that database. Verified: recreation produces exactly the 203 and
-192 views, all returning row counts identical to the reference databases.
+192 views, every table and view matching the reference databases in column
+count and row count.
+
+### Running the pipelines on it
+
+Step 3 also installs the shipped inputs where the pipelines look for them by
+default, copying each one only if the target does not exist yet:
+
+| Shipped file | Installed as |
+|---|---|
+| `recreate_database/nl2sql_<ds>.csv` | `csvs/nl2sql_<ds>.csv` |
+| `recreate_database/sample_<ds>.csv` | `csvs/sample_<ds>.csv` |
+| `recreate_database/prep_<ds>.json` | `mapping_files/prep_<ds>.json` |
+| `recreate_database/name_mapping_<ds>.json` | `mapping_files/prep_<ds>_renamed.json` |
+
+Every configuration then runs with no path flags, e.g.:
+
+```bash
+cd basesql
+python basesql.py --dataset bird --history                            # baseline
+python basesql.py --dataset bird --history --view --cluster           # +A+P
+python basesql.py --dataset bird --history --rename --view --cluster  # +A+P+R
+```
+
+The pipelines write their predictions into the evaluation CSV they read, so
+the shipped copies in `recreate_database/` stay untouched. Both installed names
+are the ones `prep_database.py` writes, so a layer generated in Step 2 takes
+the same place and is picked up the same way.
 
 ### Columns in the shipped CSVs
 
-`sample_<ds>_min.csv` is the history pool (the demonstrations retrieved at
-inference time); `nl2sql_<ds>_min.csv` is the evaluation set. Spider's
-benchmark files carry no `question_id`, `evidence` or `difficulty`, hence its
-lower column counts.
+`sample_<ds>.csv` is the history pool (the demonstrations retrieved at
+inference time); `nl2sql_<ds>.csv` is the evaluation set. Spider's benchmark
+files carry no `question_id`, `evidence` or `difficulty`, hence its lower
+column counts.
 
 **Inputs** — what the pipeline reads:
 
@@ -133,32 +161,19 @@ lower column counts.
 | `gt_tables` | both | ground-truth table set; drives cluster mining, so **+P cannot be reproduced without it** |
 | `view_SQL` | sample | the demonstration rendered against the mined views — the second half of the top-k×2 block +A shows the model |
 | `renamed_SQL`, `gt_renamed_tables`, `renamed_view_SQL` | sample | the same three in the +R namespace |
-| `base_linking_41m_{org,renamed}` | nl2sql | recorded stage-1 linking. Reusing it via `--use_linking` is how every published arm skipped stage 1, so it is required to reproduce them *exactly* rather than approximately. |
 
-`name_mapping_<ds>.json` carries a `columns` section declaring which of those
-`--rename` should read (`sql: renamed_SQL`, `gt_tables: gt_renamed_tables`,
-`view_sql: renamed_view_SQL`). Without it the pipeline defaults to `sql=SQL`,
-the *original* namespace — a renamed schema with original-namespace
-demonstrations, which degrades silently rather than erroring.
+Each prep JSON has a `columns` section declaring which of those its namespace
+reads: `name_mapping_<ds>.json` points `--rename` at `renamed_SQL`,
+`gt_renamed_tables` and `renamed_view_SQL`; `prep_<ds>.json` at `SQL`,
+`gt_tables` and `view_SQL`. Without the +R one the pipeline defaults to
+`sql=SQL`, the *original* namespace — a renamed schema with original-namespace
+demonstrations, which degrades silently rather than erroring. Its
+`view.cluster_views` is the pool +A matches against: the views a layer actually
+contains, which differ in name between the shipped layer and a generated one.
 
-**Outputs** — the published predictions, for inspection; a reproduction should
-regenerate these rather than read them:
-
-```
-<approach>_sql[_<config>]_<backbone>          the model's final SQL
-<approach>_sql[_<config>]_<backbone>_result   1 if it matched gold on execution
-```
-
-| Part | Values |
-|---|---|
-| approach | `basesql`, `dinsql`, `macsql`, `cscsql` |
-| config | *(omitted for baseline)*, `A`, `P`, `R`, `AP`, `AR`, `PR`, `APR` |
-| backbone | `41m` (gpt-4.1-mini), `54m` (gpt-5.4-mini), `gem25` (gemini-2.5-flash-lite) |
-
-e.g. `basesql_sql_41m`, `cscsql_sql_APR_41m_result`. All four approaches ship
-at `41m`; `54m` and `gem25` are BaseSQL-only, matching the backbone table. 48
-prediction + 48 result columns per dataset. The 50%-history ablation is not
-shipped.
+With the merged base tables from step 1, these give everything the paper ran
+on: the original history/test split, the original schema, and the optimized
+schema (the +R renames and the +A cluster views, in both namespaces).
 
 ---
 
@@ -174,7 +189,7 @@ Only needed to prepare a **new** database. Each phase is independently gated.
 | 4. Rename mapping | `--rename` | writes the `rename` section (`table_to_view`, `column_mapping`) and switches `tables` from originals to renamed views |
 | 5. History rewrite | `--rename` + history | rewrites each history SQL against the renamed views, **verified by executing both and comparing result sets**; failures retry, then fall back to the original with `result=0` |
 | 6. Cluster mining | `--cluster` (implied by `--view`) | no LLM — mines frequent table-set clusters from history ([`_common/clusters.py`](_common/clusters.py)). Saved to the JSON only with `--cluster`; in-memory when `--view` alone. |
-| 7. Cluster views | `--view` | one `CREATE VIEW` per ≥2-table cluster joining on FKs. Retries `--view_max_create_retries`, then falls back to a code-based FK-walker using the schema plus JOIN edges seen in history. Skips clusters with no non-cartesian join. |
+| 7. Cluster views | `--view` | one `CREATE VIEW` per cluster. A multi-table cluster joins its tables on FKs: retries `--view_max_create_retries`, then falls back to a code-based FK-walker using the schema plus JOIN edges seen in history, and is skipped only if no non-cartesian join exists. A single-table cluster gets a plain `cluster<id>_<table>` view over its table, with no LLM call. |
 | 8. History rewrite (view) | `--view` + history | as phase 5, but the LLM may also use cluster views |
 
 Every LLM call caches its prompt, raw response and parsed JSON to
@@ -207,10 +222,11 @@ is **rewritten in place** with a timestamped backup, adding `renamed_SQL`,
 | `--output_mapping_path` | `mapping_files/prep_<stem>[_renamed].json` | bare filename resolves under `mapping_files/`; absolute is used verbatim |
 | `--cache_dir` | `outputs/prep_database/<timestamp>/` | prompts and responses |
 | `--num_rows` / `--max_tokens` | 3 / 32000 | sample rows per table in the prompt / output cap |
-| `--max_retries` | 3 | phase-3 view re-prompts |
+| `--max_retries` | 3 | phase-2 re-asks when the reply is not valid JSON; phase-3 view re-prompts |
 | `--rewrite_max_retries` | 5 | phase-5 retries |
 | `--view_max_create_retries` | 3 | phase-7 retries before the code fallback |
 | `--view_max_rewrite_retries` | 5 | phase-8 retries |
+| `--rewrite_batch_size` | 50 | max history rows per LLM call in phases 5 and 8, initial pass and retries alike. Given a much longer list the model answers the first rows and stops early, so the rest never get a real retry. |
 | `--min_frequency` / `--min_tables` | 5 / 2 | a table-set needs this many history questions, and this many tables, to become a cluster |
 | `--cluster_col` / `--cluster_sql_col` | inferred | history columns holding table lists / SQL for join paths. Default `gt_renamed_tables` with `--rename`, else `gt_tables`; missing → extracted from SQL via sqlglot. |
 | `--dry_run` / `--cache_only` / `--from_cache PATH` | off | build the prompt and exit / stop after caching / skip the call and run phases 3–5 from a cached response |

@@ -123,6 +123,10 @@ def retrieve_history_for_questions(history_dir: str, input_questions: List[str],
             result[str(idx)] = entry
 
     print(f"Retrieved history for {len(result)} questions")
+    # The vLLM engine for this stage is created right after; free the encoder first.
+    from cscsql.utils.gpu_utils import release_torch_gpu
+    del model
+    release_torch_gpu()
     return result
 
 
@@ -719,10 +723,15 @@ if __name__ == '__main__':
         data["pred_sqls"] = sqls
         results.append(data)
 
-    print(f"responses[0]:")
-    print(results[0]["responses"][0])
-    print(f"pred_sqls[0]:")
-    print(results[0]["pred_sqls"][0])
+    # The merge step only receives questions whose top-2 candidates disagree, so
+    # it can legitimately have nothing to do (every vote unanimous).
+    if results:
+        print(f"responses[0]:")
+        print(results[0]["responses"][0])
+        print(f"pred_sqls[0]:")
+        print(results[0]["pred_sqls"][0])
+    else:
+        print("no prompts for this step (nothing to merge) -- writing an empty result")
 
     # Log prompts and responses per question
     stage_labels = {

@@ -149,6 +149,32 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
              "retrieval to each question's db_id (read from the 'db_id' column).",
     )
     p.add_argument(
+        "--view_bases_from_db",
+        action="store_true",
+        help="Views pool = every view defined in --db_path, with each view's "
+             "base tables resolved from its SQL definition instead of its name. "
+             "For catalogues whose view names do not encode their tables (e.g. "
+             "ASR). Views that fail to compile or to sample within 20 s are "
+             "dropped. Requires --view.",
+    )
+    p.add_argument(
+        "--hist_view_sql_col",
+        default=None,
+        metavar="COLUMN",
+        help="History CSV column holding the view-form SQL shown as "
+             "'SQL with integrated views:' examples. Overrides the default "
+             "(view_SQL / the mapping JSON's view_sql).",
+    )
+    p.add_argument(
+        "--run_tag",
+        default=None,
+        help="Appended to the run suffix, e.g. --run_tag run2 -> "
+             "revised_sql_<flags>_run2. Lets repeat runs of one configuration "
+             "accumulate side by side instead of overwriting each other, for "
+             "mean/std over runs. Off by default, so existing column names are "
+             "unchanged.",
+    )
+    p.add_argument(
         "--rows",
         default=None,
         metavar="SPEC",
@@ -259,20 +285,31 @@ def resolve_mapping_path(
     args: argparse.Namespace,
     pipeline_tag: str = "pipeline",
 ) -> Optional[str]:
-    """Return the mapping JSON path for ``--rename`` mode.
+    """Return the prep JSON path for ``--rename`` / ``--view`` / ``--cluster`` mode.
 
     If ``args.mapping_path`` is set, returns it; otherwise auto-resolves from
-    ``--dataset`` and ``--sample``. Returns ``None`` if ``--rename`` is unset.
+    ``--dataset`` and ``--sample``. Returns ``None`` if none of the flags is set,
+    and without ``--rename`` when no prep JSON exists.
     """
-    # mapping_path is needed when --rename OR --cluster is on (the consolidated
-    # prep_database config file holds both sections).
-    needs_mapping = getattr(args, "rename", False) or getattr(args, "cluster", False)
+    # The prep JSON holds the rename section, the cluster section and the
+    # cluster-view pool (view.cluster_views), so any of the three flags looks
+    # for it.
+    needs_mapping = (getattr(args, "rename", False) or getattr(args, "cluster", False)
+                     or getattr(args, "view", False))
     if not needs_mapping:
         return None
     if args.mapping_path:
         return args.mapping_path
     sample = getattr(args, "sample", 100)
     path = default_mapping_path(args.dataset, sample, rename=getattr(args, "rename", False))
+    if not getattr(args, "rename", False) and not os.path.exists(path):
+        # Only +R depends on the file. Without it, +A falls back to the view
+        # pool listed in datasets.py, +P mines its clusters from the history's
+        # gt_tables at load time, and the original-namespace history columns
+        # are already the defaults.
+        print(f"[{pipeline_tag}] no {os.path.basename(path)}; using the datasets.py view pool "
+              f"and clusters built from history")
+        return None
     print(f"[{pipeline_tag}] --mapping_path auto-resolved to {path}")
     args.mapping_path = path
     return path

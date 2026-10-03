@@ -43,6 +43,11 @@ a plain .sql file, in dependency order (renamed tables and mined views read the
 base tables; renamed cluster views read the renamed tables, so they come last).
 --recreate_benchmark replays that file onto a freshly merged database, which
 reproduces the benchmark schema without needing the reference database at all.
+It also installs the shipped evaluation CSV, history CSV and the two prep JSONs
+(original namespace and +R, each listing its cluster-view pool) from
+recreate_database/ into csvs/ and mapping_files/ under the names the pipelines
+resolve by default, so they run with no path flags. A file already there is
+never overwritten.
 
     # 1. merge the shipped per-database files into the union of base tables
     python create_database.py --src databases/bird_base_databases \
@@ -64,6 +69,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import shutil
 import sqlite3
 import sys
 from collections import OrderedDict, defaultdict
@@ -177,6 +183,37 @@ def recreate_benchmark(db_path: str, sql_path: str) -> None:
         print("   all views execute")
 
 
+def install_inputs(dataset: str) -> None:
+    """Copy the shipped CSVs and mapping to where the pipelines look by default.
+
+    The pipelines resolve <LDD>/csvs/nl2sql_<ds>.csv, <LDD>/csvs/sample_<ds>.csv
+    and the prep JSONs <LDD>/mapping_files/prep_<ds>.json (original namespace)
+    and prep_<ds>_renamed.json (+R); none of those folders is in the repo.
+    Existing files are kept, so a working setup is never clobbered.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    ldd = os.path.dirname(here)
+    shipped = os.path.join(here, "recreate_database")
+    plan = [
+        (f"nl2sql_{dataset}.csv", "csvs", f"nl2sql_{dataset}.csv"),
+        (f"sample_{dataset}.csv", "csvs", f"sample_{dataset}.csv"),
+        (f"prep_{dataset}.json", "mapping_files", f"prep_{dataset}.json"),
+        (f"name_mapping_{dataset}.json", "mapping_files", f"prep_{dataset}_renamed.json"),
+    ]
+    print()
+    for src_name, folder, dst_name in plan:
+        src = os.path.join(shipped, src_name)
+        dst = os.path.join(ldd, folder, dst_name)
+        if not os.path.exists(src):
+            print(f"   ! shipped {src_name} not found in recreate_database/")
+        elif os.path.exists(dst):
+            print(f"   kept existing {folder}/{dst_name}")
+        else:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copyfile(src, dst)
+            print(f"   installed {folder}/{dst_name}  <- recreate_database/{src_name}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--src", help="directory of per-database SQLite files")
@@ -213,6 +250,7 @@ def main() -> None:
         if not a.out or not os.path.exists(a.out):
             sys.exit("--recreate_benchmark without --src needs an existing --out")
         recreate_benchmark(a.out, a.recreate_benchmark)
+        install_inputs(a.dataset)
         return
 
     if not a.src or not a.out:
@@ -363,6 +401,7 @@ def main() -> None:
     if a.recreate_benchmark:
         print()
         recreate_benchmark(a.out, a.recreate_benchmark)
+        install_inputs(a.dataset)
 
 
 if __name__ == "__main__":

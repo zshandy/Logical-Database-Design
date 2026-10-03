@@ -936,7 +936,7 @@ Candidate B execute result:
                                                                reverse=False)
 
             print(f"diff vote execute sql: {len(vote_predict_sql_results)} - {db_root} - {selection_vote_file}")
-            print(f"none gold: {none_gold} - {none_gold / len(vote_predict_sql_results)}")
+            print(f"none gold: {none_gold} - {none_gold / max(len(vote_predict_sql_results), 1)}")
         except Exception as e:
             traceback.print_exc()
 

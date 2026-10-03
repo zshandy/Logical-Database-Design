@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Build the shared inputs for all three arms of one dataset.
+# Build the shared inputs for the paper's eight arms of one dataset
+# (base a p r ap ar pr apr, as run_arm.sh names them).
 #
 #   ./prep_all.sh <dataset> [limit]
 #
 # generate_docs.py and embedding_docs.py rebuild EVERY db_name namespace found
-# under resource/databases/sqlite/, so they must run once after all three arms'
+# under resource/databases/sqlite/, so they must run once after all arms'
 # dumps exist -- not per arm.
 set -eu
 PY="${PY:-python}"
@@ -17,7 +18,7 @@ LIMIT_ARGS=""
 
 echo "=== prep: $DS ${LIMIT:+(pilot $LIMIT)} ==="
 
-for spec in "base:" "opt1:--view --cluster --mode opt1" "opt2:--view --cluster --mode opt2"             "rbase:--rename" "ropt1:--rename --view --cluster --mode opt1"             "ropt2:--rename --view --cluster --mode opt2"; do
+for spec in "base:" "a:--view --mode opt1" "p:--cluster --mode opt2" "r:--rename" "ap:--view --cluster --mode opt2" "ar:--rename --view --mode opt1" "pr:--rename --cluster --mode opt2" "apr:--rename --view --cluster --mode opt2"; do
   name="${spec%%:*}"; flags="${spec#*:}"
   echo; echo ">>> dumps + questions: $DS/$name"
   "$PY" -u prep_ldd_inputs.py --dataset "$DS" $flags --top_n 30 $LIMIT_ARGS

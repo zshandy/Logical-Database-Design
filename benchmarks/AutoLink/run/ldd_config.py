@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -141,7 +142,7 @@ class Arm:
     # ---------------- history wiring ----------------
     @property
     def hist(self) -> dict:
-        return HISTORY_COLS[(self.dataset, self.rename)]
+        return history_cols(self.dataset, self.rename)
 
     def validate(self) -> None:
         h = self.hist
@@ -200,9 +201,59 @@ class Arm:
         return f"merged_{self.dataset}{self.suffix}"
 
 
+MAPPING_DIR = os.path.join(LDD, "mapping_files")
+
+
+def _prep_json(dataset: str, rename: bool) -> Optional[str]:
+    """The namespace's prep JSON -- what prep_database.py writes and
+    create_database.py --recreate_benchmark installs -- or None if absent."""
+    p = os.path.join(MAPPING_DIR, f"prep_{dataset}{'_renamed' if rename else ''}.json")
+    return p if os.path.exists(p) else None
+
+
+def _with_common():
+    bench = os.path.abspath(os.path.join(HERE, os.pardir, os.pardir))
+    if bench not in sys.path:
+        sys.path.insert(0, bench)
+
+
 def load_object_lists(path: str = OBJECT_LISTS) -> Dict[str, List[str]]:
+    """The 8 object lists, overridden by the prep JSONs where they exist.
+
+    object_lists.json holds the shipped layer's lists; a prep JSON records the
+    layer actually in the database (a generated one names its objects
+    differently), so its ``tables`` / ``view.cluster_views`` win. When both name
+    the same objects the object_lists.json order is kept.
+    """
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        lists = json.load(f)
+    _with_common()
+    from _common.rename_mapping import load_active_views
+    for ds in ("bird", "spider"):
+        for rename, ns in ((False, "org"), (True, "renamed")):
+            p = _prep_json(ds, rename)
+            if not p:
+                continue
+            tables, views = load_active_views(p)
+            for key, new in ((f"{ds}_{ns}_tables", tables), (f"{ds}_{ns}_views", views)):
+                if new and set(new) != set(lists[key]):
+                    lists[key] = list(new)
+    return lists
+
+
+def history_cols(dataset: str, rename: bool) -> dict:
+    """HISTORY_COLS for one namespace, with the column names its prep JSON
+    records (``columns``) taking precedence."""
+    h = dict(HISTORY_COLS[(dataset, rename)])
+    p = _prep_json(dataset, rename)
+    if p:
+        _with_common()
+        from _common.rename_mapping import load_active_columns
+        cols = load_active_columns(p)
+        for k in ("sql", "view_sql", "gt_tables"):
+            if cols.get(k):
+                h[k] = cols[k]
+    return h
 
 
 def base_arms(dataset: str = "bird", model_tag: str = "ds") -> List[Arm]:

@@ -177,19 +177,19 @@ REWRITE_PROMPT_TEMPLATE = """You are a database expert. You have just renamed ev
 - Do not add LIMIT, ORDER BY, or DISTINCT that wasn't in the original.
 - If the original used a table alias (e.g. `T1`), feel free to keep aliases — but the FROM/JOIN must point at a renamed view, not an original table.
 
-# Workload to rewrite ({n_rows} row(s), indices 0..{n_rows_minus_1})
+# Workload to rewrite ({n_rows} row(s); each is labelled `index : <n>`)
 ###
 {workload}
 ###
 
 # Output
 
-Respond with a single JSON object. The `rewrites` array must contain exactly {n_rows} entries, indexed 0..{n_rows_minus_1}, in order.
+Respond with a single JSON object. The `rewrites` array must contain exactly {n_rows} entries, one per row above, in order, each carrying that row's own `index` as listed.
 
 {{
   "rewrites": [
-    {{"index": 0, "renamed_sql": "<rewritten SQL using renamed views + renamed columns>"}},
-    {{"index": 1, "renamed_sql": "..."}}
+    {{"index": <the row's index>, "renamed_sql": "<rewritten SQL using renamed views + renamed columns>"}},
+    {{"index": <the next row's index>, "renamed_sql": "..."}}
   ]
 }}
 """
@@ -951,18 +951,37 @@ _OUTPUT_BUDGET_HEADROOM = 1200  # reserve for outer JSON wrap + EOS etc.
 _CHARS_PER_TOKEN = 3
 
 
+def _align_batch_indices(index_to_sql: dict, chunk: list) -> dict:
+    """Key a batch's rewrites by global row index.
+
+    The prompt lists each row as ``index : <global n>`` and asks for those
+    indices back. A reply that instead numbers the batch 0..len-1 (none of its
+    keys a row of this batch) is mapped back by position. Every rewrite is still
+    execution-verified against its own row's gold SQL afterwards.
+    """
+    keys = set(index_to_sql)
+    if keys and not keys & set(chunk) and keys <= set(range(len(chunk))):
+        return {chunk[k]: v for k, v in index_to_sql.items()}
+    return index_to_sql
+
+
 def _chunk_pending(args: argparse.Namespace, pending_idx: list) -> list:
-    """Split ``pending_idx`` into chunks that each fit within the output budget.
+    """Split ``pending_idx`` into chunks of at most ``--rewrite_batch_size`` rows
+    that also fit within the output budget.
 
     Returns a list of index lists. A single chunk = single LLM call.
 
-    The estimate is purposely conservative: we'd rather over-split than have
-    the LLM truncate its output mid-row.
+    The budget estimate is purposely conservative: we'd rather over-split than
+    have the LLM truncate its output mid-row. The row cap matters more: given a
+    long list, the model answers the first rows and closes its JSON early,
+    well inside the budget, so rows deep in a large call never get attempted
+    and come back as "no response" on every retry.
     """
     if not pending_idx:
         return []
     output_budget_chars = max(0, args.max_tokens * _CHARS_PER_TOKEN - _OUTPUT_BUDGET_HEADROOM)
     max_per_chunk = max(1, output_budget_chars // _OUTPUT_CHARS_PER_ROW)
+    max_per_chunk = min(max_per_chunk, max(1, getattr(args, "rewrite_batch_size", 50)))
     if len(pending_idx) <= max_per_chunk:
         return [pending_idx]
     return [
@@ -1099,8 +1118,8 @@ def rewrite_history_sqls(
         # Most runs will single-pass; only big histories or long-tail retries split.
         chunks = _chunk_pending(args, pending_idx)
         if len(chunks) > 1:
-            print(f"[history rewrite] {label}: {len(pending_idx)} row(s) > output budget; "
-                  f"splitting into {len(chunks)} batch(es)")
+            print(f"[history rewrite] {label}: {len(pending_idx)} row(s); "
+                  f"splitting into {len(chunks)} batch(es) of <= {len(chunks[0])}")
 
         attempt_successes = 0
         new_pending: list = []
@@ -1148,7 +1167,7 @@ def rewrite_history_sqls(
                     llm_failure.append(i)
                     new_pending.append(i)
                 continue
-            index_to_sql = _parse_rewrite_response(parsed)
+            index_to_sql = _align_batch_indices(_parse_rewrite_response(parsed), chunk)
 
             for i in chunk:
                 cand = index_to_sql.get(i)
@@ -1941,7 +1960,9 @@ def create_cluster_views(
 ) -> tuple:
     """For each cluster, create a 1-view that joins all its tables.
 
-    Strategy: LLM up to ``--view_max_create_retries`` times (each attempt's
+    A single-table cluster gets a plain ``cluster<id>_<table>`` view over its
+    table, built directly without an LLM call. For multi-table clusters the
+    strategy is: LLM up to ``--view_max_create_retries`` times (each attempt's
     prompt + raw response + parsed SQL is cached to ``cache_dir``), then the
     adapted code-based fallback. A cluster whose view never works correctly
     is skipped.
@@ -1967,18 +1988,36 @@ def create_cluster_views(
 
     successful_views: list = []
     skipped: list = []
-    single_table_skips: list = []
+    single_table_views: list = []
 
     for cluster in exact_clusters:
         cluster_id = cluster.get("cluster_id")
         cluster_tables = list(cluster.get("tables", []))
-        if len(cluster_tables) < 2:
-            # Single-table clusters come from per-question 'new cluster' assignment
-            # for questions whose table set didn't match any frequent pattern.
-            # They can't have a join view, so we skip them — but count them
-            # separately so the failure summary at the end is honest.
-            single_table_skips.append((cluster_id, cluster_tables))
-            skipped.append((cluster_id, "cluster has <2 tables"))
+        if not cluster_tables:
+            skipped.append((cluster_id, "cluster has no tables"))
+            continue
+        if len(cluster_tables) == 1:
+            # Single-table clusters keep a view, as in the published catalogue
+            # (e.g. cluster49_votes): one view per cluster, joins or not. There is
+            # no join to synthesise, so no LLM call -- the view selects every
+            # column of its table. The cluster<N>_ prefix keeps the name from
+            # colliding with the table itself; parse_view_base_tables strips it.
+            t = cluster_tables[0]
+            view_name = f"cluster{cluster_id}_{t}"
+            cols = _column_names(args.db_path, t)
+            create_sql = (
+                f'CREATE VIEW "{view_name}" AS SELECT '
+                + ", ".join('"' + c.replace('"', '""') + '"' for c in cols)
+                + f' FROM "{t}"'
+            )
+            ok, reason = _try_apply_and_verify_view(args.db_path, view_name, create_sql, len(cols))
+            if ok:
+                print(f"   [cluster {cluster_id}] ✅ single-table view → {view_name}")
+                single_table_views.append(cluster_id)
+                successful_views.append((view_name, cluster_id, cluster_tables, create_sql))
+            else:
+                print(f"   [cluster {cluster_id}] ❌ single-table view failed: {reason} — skipped")
+                skipped.append((cluster_id, f"single-table view: {reason}"))
             continue
 
         view_name = "_join_".join(cluster_tables)
@@ -2052,14 +2091,11 @@ def create_cluster_views(
             skipped.append((cluster_id, f"code fallback: {fb_reason}"))
 
     print()
-    real_failures = [s for s in skipped if s not in [(c, "cluster has <2 tables") for c, _t in single_table_skips]]
-    print(f"[prep_database] views created: {len(successful_views)}/{len(exact_clusters)}, "
-          f"skipped: {len(skipped)} "
-          f"(of which {len(single_table_skips)} were single-table singletons, "
-          f"{len(real_failures)} were real failures)")
-    if single_table_skips:
-        single_ids = sorted(c for c, _ in single_table_skips)
-        print(f"   single-table singletons (no join possible): cluster ids {single_ids[:20]}"
+    print(f"[prep_database] views created: {len(successful_views)}/{len(exact_clusters)} "
+          f"(of which {len(single_table_views)} single-table), skipped: {len(skipped)}")
+    if single_table_views:
+        single_ids = sorted(single_table_views)
+        print(f"   single-table views: cluster ids {single_ids[:20]}"
               f"{'...' if len(single_ids) > 20 else ''}")
     return successful_views, skipped
 
@@ -2094,19 +2130,19 @@ VIEW_REWRITE_PROMPT_TEMPLATE = """You are a database expert. The base tables hav
 - The rewritten SQL must return the SAME result set as the original.
 - Column-naming convention inside cluster views: a column from the renamed base table is exposed under its renamed name UNLESS the same renamed name appeared in another of the cluster's base tables — only those colliding columns become `<base_table>_<column>` (with the base table prefix from the cluster view's `base_tables`). The authoritative list is the `columns` field of each cluster view above.
 
-# Workload to rewrite ({n_rows} row(s), indices 0..{n_rows_minus_1})
+# Workload to rewrite ({n_rows} row(s); each is labelled `index : <n>`)
 ###
 {workload}
 ###
 
 # Output
 
-Respond with a single JSON object. The `rewrites` array MUST contain exactly {n_rows} entries, indexed 0..{n_rows_minus_1}, in order.
+Respond with a single JSON object. The `rewrites` array MUST contain exactly {n_rows} entries, one per row above, in order, each carrying that row's own `index` as listed.
 
 {{
   "rewrites": [
-    {{"index": 0, "view_sql": "<rewritten SQL using a cluster view if applicable, else renamed base tables>"}},
-    {{"index": 1, "view_sql": "..."}}
+    {{"index": <the row's index>, "view_sql": "<rewritten SQL using a cluster view if applicable, else renamed base tables>"}},
+    {{"index": <the next row's index>, "view_sql": "..."}}
   ]
 }}
 """
@@ -2307,8 +2343,8 @@ def rewrite_history_with_views(
 
         chunks = _chunk_pending(args, pending_idx)
         if len(chunks) > 1:
-            print(f"[view rewrite] {label}: {len(pending_idx)} row(s) > output budget; "
-                  f"splitting into {len(chunks)} batch(es)")
+            print(f"[view rewrite] {label}: {len(pending_idx)} row(s); "
+                  f"splitting into {len(chunks)} batch(es) of <= {len(chunks[0])}")
 
         attempt_successes = 0
         new_pending: list = []
@@ -2358,7 +2394,7 @@ def rewrite_history_with_views(
                     llm_failure.append(i)
                     new_pending.append(i)
                 continue
-            index_to_sql = _parse_view_rewrite_response(parsed)
+            index_to_sql = _align_batch_indices(_parse_view_rewrite_response(parsed), chunk)
 
             for i in chunk:
                 cand = index_to_sql.get(i)
@@ -2515,7 +2551,7 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
                         "from PATH and run only the apply + mapping phases. The DB is still "
                         "backed up before any modification.")
     p.add_argument("--max_retries", type=int, default=3,
-                   help="Max LLM re-prompts for failed views. Default: 3.")
+                   help="Max LLM re-asks when the rename response is not valid JSON, and max re-prompts for failed views. Default: 3.")
     p.add_argument("--output_mapping_path", default=None,
                    help="Full path (or just filename) for the consolidated prep JSON. "
                         "Default: <LDD>/mapping_files/prep_<short_stem>[_renamed].json "
@@ -2537,6 +2573,9 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
                         "(execution error, result mismatch, or used a non-renamed table). "
                         "After this many retries, the row falls back to the original SQL "
                         "with result=0. Default: 5.")
+    p.add_argument("--rewrite_batch_size", type=int, default=50,
+                   help="Max history rows per LLM call in the rename and view-aware "
+                        "rewrite phases (initial pass and every retry). Default: 50.")
     p.add_argument("--skip_history_rewrite", action="store_true",
                    help="Skip the history-rewrite phase even when --history is enabled. "
                         "Useful when you only want the views + mapping JSON.")
@@ -2675,24 +2714,37 @@ def _initial_llm_phase(
         return None
 
     is_gemini = args.model.startswith("gemini")
-    print(f"[prep_database] calling {args.model} (max_tokens={args.max_tokens})...")
     if is_gemini:
         ensure_gemini()
-        response = chat_with_gemini(prompt, model=args.model, max_tokens=args.max_tokens)
     else:
         ensure_openai()
-        response = chat_with_chatgpt(prompt, model=args.model, max_tokens=args.max_tokens)
+    # One long JSON reply carries every table's CREATE VIEW, so a single stray
+    # token (e.g. Python-style \"\"\" quotes) makes it unparseable. Re-ask up to
+    # --max_retries times instead of failing the whole run.
+    parsed = None
+    for attempt in range(1, args.max_retries + 2):
+        print(f"[prep_database] calling {args.model} (max_tokens={args.max_tokens})"
+              f"{'' if attempt == 1 else f' -- attempt {attempt}'}...")
+        if is_gemini:
+            response = chat_with_gemini(prompt, model=args.model, max_tokens=args.max_tokens)
+        else:
+            response = chat_with_chatgpt(prompt, model=args.model, max_tokens=args.max_tokens)
 
-    with open(raw_path, "w", encoding="utf-8") as f:
-        f.write(response)
-    print(f"[prep_database] raw response cached to {raw_path}  ({len(response)} chars)")
+        path = raw_path if attempt == 1 else raw_path.replace(".raw.txt", f".attempt{attempt}.raw.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(response)
+        print(f"[prep_database] raw response cached to {path}  ({len(response)} chars)")
 
-    try:
-        parsed = json.loads(extract_json_block(response))
-    except Exception as e:
+        try:
+            parsed = json.loads(extract_json_block(response))
+            break
+        except Exception as e:
+            print(f"[prep_database] LLM response could not be parsed as JSON: "
+                  f"{type(e).__name__}: {e}")
+    if parsed is None:
         raise SystemExit(
-            f"LLM response could not be parsed as JSON: {type(e).__name__}: {e}\n"
-            f"Raw response is at {raw_path}."
+            f"LLM response could not be parsed as JSON after {args.max_retries + 1} "
+            f"attempts. Raw responses are next to {raw_path}."
         )
     with open(response_path, "w", encoding="utf-8") as f:
         json.dump(parsed, f, indent=2, ensure_ascii=False)

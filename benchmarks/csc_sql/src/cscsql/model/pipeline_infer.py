@@ -124,7 +124,11 @@ def run_eval_by_cmd(opt, eval_mode="greedy_search", eval_step=None):
         {view_arg} \
         {history_arg} \
         --test_offset {getattr(opt, 'test_offset', 0)}"
+    from cscsql.utils.gpu_utils import gpu_used_mib, wait_for_gpu_release
+    _gpu_before = gpu_used_mib(opt.visible_devices)
     rc = os.system(greedy_search_cmd)
+    # the next stage is a fresh vLLM process: let this one's VRAM come back first
+    wait_for_gpu_release(_gpu_before, opt.visible_devices)
     if rc != 0:
         # Surface it. Previously the exit code was dropped, so an inference
         # stage that never started still looked like a completed run and only

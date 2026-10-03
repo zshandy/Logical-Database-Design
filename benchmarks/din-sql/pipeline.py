@@ -287,10 +287,11 @@ def setup(args: argparse.Namespace, df: pd.DataFrame) -> PipelineState:
         if "db_id" not in df.columns:
             raise SystemExit("--per_db requires a 'db_id' column in the input CSV.")
 
-    # resolve_mapping_path returns None when neither --rename nor --cluster is
-    # set; otherwise it auto-resolves to the standard location (or honors the
-    # user's --mapping_path). We always call it so that --cluster --view runs
-    # without --rename can still load the prep JSON's columns/tables section.
+    # resolve_mapping_path returns None when none of --rename / --view /
+    # --cluster is set, or (without --rename) when no prep JSON exists;
+    # otherwise it auto-resolves to the standard location (or honors the
+    # user's --mapping_path). Without --rename the file is optional: it only
+    # supplies the columns / tables / cluster-view pool of a generated layer.
     mapping_path = resolve_mapping_path(args, "dinsql")
     if mapping_path and not os.path.exists(mapping_path):
         raise SystemExit(

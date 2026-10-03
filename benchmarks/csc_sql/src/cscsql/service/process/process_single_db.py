@@ -262,8 +262,10 @@ def find_matching_views(selected_tables: List[str], view_list: List[str]) -> Lis
 
 # Name-mapping files (produced alongside MAC-SQL). Used to reconstruct FKs for renamed tables
 # since the merged sqlite stores renamed tables without FK constraints (PRAGMA returns empty).
-# Bird direction:   column_mapping[renamed_table] = {original_col: renamed_col}
-# Spider direction: column_mapping[renamed_table] = {renamed_col: original_col}
+# Both datasets: column_mapping[renamed_table] = {original_col: renamed_col} -- the shipped
+# spider mapping and every prep_database.py output use this direction (older inverted
+# spider files were migrated by flip_spider_mapping.py). A consolidated prep JSON nests
+# both maps under "rename".
 # Path resolution tries multiple candidates so the code works from both Windows and WSL.
 def _find_first_existing(candidates):
     for p in candidates:
@@ -278,6 +280,10 @@ _LDD_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", "..", "..", ".."
 _MAPPING_DIR = os.path.join(_LDD_ROOT, "mapping_files")
 _BIRD_MAPPING_PATH   = os.path.join(_MAPPING_DIR, "name_mapping_bird.json")
 _SPIDER_MAPPING_PATH = os.path.join(_MAPPING_DIR, "name_mapping_spider.json")
+# Set by run_single_db.py when it auto-resolved the prep JSON for --rename / --view
+# alone: then a JSON table/view list naming the same objects as the built-in one
+# keeps the built-in order.
+_KEEP_BUILTIN_ORDER = False
 
 
 def _lookup_renamed_col(inner_map: dict, orig_col: str, direction: str) -> str:
@@ -302,13 +308,15 @@ def supplement_renamed_fks(db_path: str, renamed_tables_in_list: list,
     suitable for db_info['foreign_keys']."""
     import json
     mapping_path = _SPIDER_MAPPING_PATH if dataset == "spider" else _BIRD_MAPPING_PATH
-    direction = "spider" if dataset == "spider" else "bird"
+    direction = "bird"   # {original_col: renamed_col} for both datasets (see the note above)
     if not os.path.exists(mapping_path):
         print(f"  [FK mapping] WARNING: {dataset} mapping file not found at {mapping_path} — renamed tables will have no FKs")
         return []
 
     with open(mapping_path, "r", encoding="utf-8") as f:
         mapping = json.load(f)
+    if isinstance(mapping.get("rename"), dict) and "table_to_view" in mapping["rename"]:
+        mapping = mapping["rename"]                         # consolidated prep JSON
     table_to_renamed = mapping.get("table_to_view", {})   # {orig_table: renamed_table}
     column_mapping   = mapping.get("column_mapping", {})  # {renamed_table: inner}
 
@@ -847,6 +855,10 @@ def precompute_history(history_path: str, output_dir: str, rename: bool = False,
     history_texts = ["passage: " + q.strip() for q in history_questions]
     history_embs = model.encode(history_texts, normalize_embeddings=True, show_progress_bar=True)
     print(f"Encoded {len(history_embs)} history embeddings")
+    # This process lives for the whole run; free the encoder before any vLLM stage starts.
+    from cscsql.utils.gpu_utils import release_torch_gpu
+    del model
+    release_torch_gpu()
 
     # Save embeddingsw
     emb_path = os.path.join(output_dir, "history_embeddings.npy")
@@ -995,7 +1007,9 @@ def process_csv_to_prompts(csv_path: str, db_path: str, output_path: str,
                 _sys_at.path.insert(0, _bench_root_at)
             from _common.rename_mapping import load_active_views
             _at, _ = load_active_views(cluster_path)
-            if _at:
+            if _at and _KEEP_BUILTIN_ORDER and set(_at) == set(get_allowed_tables(rename, dataset=dataset_name)):
+                print(f"📋 --mapping_path: same {len(_at)} tables as the built-in list (order kept)")
+            elif _at:
                 _json_active_tables = _at
                 print(f"📋 --mapping_path: using {len(_at)} tables from {os.path.basename(cluster_path)}")
         except Exception as _e:
@@ -1063,7 +1077,9 @@ def process_csv_to_prompts(csv_path: str, db_path: str, output_path: str,
             try:
                 from _common.rename_mapping import load_active_views as _lav
                 _, _jv = _lav(cluster_path)
-                if _jv:
+                if _jv and _KEEP_BUILTIN_ORDER and set(_jv) == set(get_view_list(rename, dataset=dataset_name)):
+                    print(f"📋 --mapping_path: same {len(_jv)} cluster_views as the built-in list (order kept)")
+                elif _jv:
                     view_list = _jv
                     print(f"📋 --mapping_path: using {len(_jv)} cluster_views from {os.path.basename(cluster_path)}")
             except Exception as _e:

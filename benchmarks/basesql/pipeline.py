@@ -65,7 +65,73 @@ from _common.schema import (  # noqa: E402
     list_tables_and_views,
 )
 from _common.sql_exec import validate_sql_query  # noqa: E402
-from _common.views import find_matching_views, parse_view_base_tables  # noqa: E402
+from _common.views import (find_matching_views, parse_view_base_tables,  # noqa: E402
+                           register_view_bases)
+import functools  # noqa: E402
+
+
+@functools.lru_cache(maxsize=None)
+def _view_schema_prompt(db_path: str, view: str) -> str:
+    """A view's schema block. Pure function of a static DB, so it is rendered
+    once per process instead of once per question (ASR views aggregate over
+    large tables and are slow to sample)."""
+    return generate_schema_prompt(db_path=db_path, num_rows=3, no_join=False,
+                                  target_table=view)
+
+
+def _load_sql_defined_views(db_path: str, base_tables) -> List[str]:
+    """--view_bases_from_db: pool = views in ``db_path`` whose base tables are
+    resolved from their SQL, keeping only views that compile and sample fast."""
+    import sqlite3
+    import time
+    import sqlglot
+    from sqlglot import exp as _exp
+    canon = {str(t).lower(): t for t in base_tables}
+    con = sqlite3.connect(db_path)
+    con.text_factory = lambda b: b.decode("utf-8", "replace")
+    rows = con.execute("SELECT name, sql FROM sqlite_master WHERE type='view'").fetchall()
+    refs = {}
+    for name, sql in rows:
+        try:
+            refs[name.lower()] = {t.name.lower() for t in
+                                  sqlglot.parse_one(sql, read="sqlite").find_all(_exp.Table)}
+        except Exception:
+            refs[name.lower()] = set()
+
+    def _resolve(v, seen=()):
+        # layered catalogues build views on other views: follow the chain
+        out = set()
+        for t in refs.get(v, ()):
+            if t in canon:
+                out.add(canon[t])
+            elif t in refs and t not in seen and t != v:
+                out |= _resolve(t, seen + (v,))
+        return out
+
+    keep, bases, n_broken, n_slow, n_nobase = [], {}, 0, 0, 0
+    for name, sql in rows:
+        b = sorted(_resolve(name.lower()))
+        if not b:
+            n_nobase += 1
+            continue
+        deadline = time.monotonic() + 20
+        con.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10000)
+        try:
+            con.execute('SELECT * FROM "%s" LIMIT 3' % name).fetchall()
+        except Exception as e:
+            if "interrupted" in str(e).lower():
+                n_slow += 1
+            else:
+                n_broken += 1
+            continue
+        keep.append(name)
+        bases[name] = b
+    con.close()
+    register_view_bases(bases)
+    print(f"--view_bases_from_db: {len(rows)} views in {os.path.basename(db_path)} -> "
+          f"{len(keep)} usable ({n_broken} fail to compile, {n_slow} too slow to sample, "
+          f"{n_nobase} reference no base table)")
+    return keep
 
 from . import prompts as _prompts  # noqa: E402
 from .config import (  # noqa: E402
@@ -230,6 +296,10 @@ def _build_suffix(args: argparse.Namespace, is_gemini: bool,
         suffix += f"_gem{model_digits}"
     elif args.model != "gpt-4.1-mini":
         suffix += f"_gpt{model_digits}"
+    # Repeat-run tag goes last so the configuration part of the name is
+    # unchanged and `_run2` reads as "same arm, another draw".
+    if getattr(args, "run_tag", None):
+        suffix += f"_{args.run_tag}"
     return suffix
 
 
@@ -283,10 +353,11 @@ def setup(args: argparse.Namespace, df: pd.DataFrame) -> PipelineState:
         if "db_id" not in df.columns:
             raise SystemExit("--per_db requires a 'db_id' column in the input CSV.")
 
-    # resolve_mapping_path returns None when neither --rename nor --cluster is
-    # set; otherwise it auto-resolves to the standard location (or honors the
-    # user's --mapping_path). We always call it so that --cluster --view runs
-    # without --rename can still load the prep JSON's columns/tables section.
+    # resolve_mapping_path returns None when none of --rename / --view /
+    # --cluster is set, or (without --rename) when no prep JSON exists;
+    # otherwise it auto-resolves to the standard location (or honors the
+    # user's --mapping_path). Without --rename the file is optional: it only
+    # supplies the columns / tables / cluster-view pool of a generated layer.
     mapping_path = resolve_mapping_path(args, "basesql")
     if mapping_path and not os.path.exists(mapping_path):
         raise SystemExit(
@@ -315,6 +386,11 @@ def setup(args: argparse.Namespace, df: pd.DataFrame) -> PipelineState:
             print(f"📋 --mapping_path: using {len(json_views)} cluster_views from {os.path.basename(mapping_path)}")
             extra_views_pool = json_views
 
+    if getattr(args, "view_bases_from_db", False):
+        if not args.view:
+            raise SystemExit("--view_bases_from_db requires --view")
+        extra_views_pool = _load_sql_defined_views(args.db_path, base_tables)
+
     base_schema = _build_base_schema(
         args.db_path, list(base_tables),
         rename=args.rename,
@@ -324,6 +400,9 @@ def setup(args: argparse.Namespace, df: pd.DataFrame) -> PipelineState:
     hist_sql_col, hist_view_sql_col, hist_gt_tables_col = _history_column_names(
         args.rename, rename_v_suffix, args=args,
     )
+    if getattr(args, "hist_view_sql_col", None):
+        hist_view_sql_col = args.hist_view_sql_col
+        print(f"--hist_view_sql_col: view-form history examples from {hist_view_sql_col!r}")
 
     from _common import db_backend
     dialect = "MySQL" if db_backend.is_mysql(args.db_path) else "SQLite"
@@ -708,9 +787,7 @@ def _build_updated_schema(
                 ]
                 if matched:
                     updated += "\n\n" + "\n\n".join(
-                        generate_schema_prompt(
-                            db_path=state.db_path, num_rows=3, no_join=False, target_table=v
-                        )
+                        _view_schema_prompt(state.db_path, v)
                         for v in matched
                     ) + "\n\n"
         else:
@@ -726,9 +803,7 @@ def _build_updated_schema(
                 ]
             if matched:
                 updated += "\n\n" + "\n\n".join(
-                    generate_schema_prompt(
-                        db_path=state.db_path, num_rows=3, no_join=False, target_table=v
-                    )
+                    _view_schema_prompt(state.db_path, v)
                     for v in matched
                 ) + "\n\n"
 

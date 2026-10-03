@@ -1117,17 +1117,23 @@ if __name__ == "__main__":
     if args.cluster_filter is None:
         args.cluster_filter = bool(args.cluster)
 
-    # Cluster precomputed file: re-use --mapping_path (the consolidated prep config
-    # holds both the rename mapping and the cluster section).
-    if args.cluster and not args.mapping_path:
+    # The consolidated prep config holds the rename mapping, the cluster section
+    # and the cluster-view pool, so any of --rename / --view / --cluster looks for
+    # it -- the file prep_database.py writes and create_database.py
+    # --recreate_benchmark installs. Only an existing file is used; without one
+    # the built-in table/view lists and history-built clusters apply.
+    _mapping_auto_new = False
+    if (args.cluster or args.rename or args.view) and not args.mapping_path:
         _suffix = "_renamed" if args.rename else ""
         _cand = _os.path.join(_ldd_root, "mapping_files", f"prep_{args.dataset}{_suffix}.json")
-        args.mapping_path = _cand
         if _os.path.exists(_cand):
+            args.mapping_path = _cand
+            # --cluster always auto-resolved; --rename / --view alone now do too
+            _mapping_auto_new = not args.cluster
             print(f"[run_union] --mapping_path auto-resolved to {_cand}")
         else:
-            print(f"[run_union] --mapping_path auto-resolved to {_cand} "
-                  f"(not found — will build clusters from history)")
+            print(f"[run_union] no {_os.path.basename(_cand)} — using the built-in table/view lists"
+                  + (" and building clusters from history" if args.cluster else ""))
 
     # --mapping_path: override the module-level mapping constant for the active dataset.
     if args.mapping_path:
@@ -1146,8 +1152,13 @@ if __name__ == "__main__":
     if args.db_path:
         sqlite_path = args.db_path
         print(f"--db_path override: {sqlite_path}")
-    if args.history_sql_col_prefix is None:
-        args.history_sql_col_prefix = default_cluster
+    # NOTE: default_cluster is applied AFTER the mapping-JSON block below, not
+    # here. Setting it at this point made the prefix non-None before the JSON
+    # was consulted, so `columns.sql` could never override it -- and the static
+    # default is wrong for the renamed arms: it yields renamed_SQL /
+    # gt_renamed_tables, which do not carry renamed table names, so clusters
+    # match almost nothing and both the History SQLs and Common Join Paths
+    # blocks silently vanish from the Decomposer prompt.
 
     # JSON-as-source-of-truth: when a mapping file is supplied, its top-level
     # ``tables`` drives the active table list — applies regardless of --rename,
@@ -1160,7 +1171,12 @@ if __name__ == "__main__":
             _sys_for_view.path.insert(0, _bench_root_for_view)
         from _common.rename_mapping import load_active_views
         _json_tables, _json_views = load_active_views(args.mapping_path)
-        if _json_tables:
+        if _json_tables and _mapping_auto_new and set(_json_tables) == set(tables):
+            # Newly auto-resolved for --rename / --view and naming the same
+            # tables as the built-in list: keep that list's order, which is what
+            # these arms always used, so their prompts stay byte-identical.
+            print(f"📋 --mapping_path: same {len(tables)} tables as the built-in list (order kept)")
+        elif _json_tables:
             print(f"📋 --mapping_path: using {len(_json_tables)} tables from {_os.path.basename(args.mapping_path)}")
             tables = _json_tables
 
@@ -1196,6 +1212,11 @@ if __name__ == "__main__":
         if _json_cols.get("view_sql"):
             args.view_sql_col = _json_cols["view_sql"]
             print(f"--view_sql_col auto-resolved to {args.view_sql_col!r} (from mapping JSON columns.view_sql)")
+    # Static per-dataset default, applied only if neither the CLI nor the
+    # mapping JSON's columns.sql supplied a prefix (see the note above).
+    if args.history_sql_col_prefix is None:
+        args.history_sql_col_prefix = default_cluster
+
     if args.question_col is None:
         args.question_col = "question"
     if args.sql_col is None:

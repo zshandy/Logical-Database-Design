@@ -11,9 +11,11 @@ One pass per dataset:
         _result          set(pred) == set(gold)          (compare_sql semantics)
         _result_lenient  compare_pandas_table(pred,gold) (AutoLink's shipped
                          comparator, imported, NO union with strict)
-  4. write SQL + both result columns into csvs/nl2sql_<ds>.csv AND into
-     benchmarks/recreate_database/nl2sql_<ds>_min.csv (artifact naming:
-     autolink_sql[_CFG]_ds), so the artifact carries a full AutoLink run.
+  4. write SQL + both result columns into csvs/nl2sql_<ds>.csv and, when it
+     exists, into csvs/nl2sql_<ds>_min.csv (artifact naming:
+     autolink_sql[_CFG]_ds), the full-results copy kept alongside the working
+     CSV. It is not shipped -- recreate_database/nl2sql_<ds>.csv carries
+     inputs only -- so on a fresh clone only the working CSV is written.
   5. report EX, delta vs baseline, McNemar vs baseline, and the full pairwise
      McNemar p-value grid, on the shipped comparator.
 
@@ -117,18 +119,24 @@ def main():
     for ds in ([a.dataset] if a.dataset else ["bird", "spider"]):
         n_expect = 767 if ds == "bird" else 502
         work = os.path.join(LDD, "csvs", f"nl2sql_{ds}.csv")
-        mini = os.path.join(LDD, "benchmarks", "recreate_database",
-                            f"nl2sql_{ds}_min.csv")
+        mini = os.path.join(LDD, "csvs", f"nl2sql_{ds}_min.csv")
         df = pd.read_csv(work, low_memory=False)
-        mn = pd.read_csv(mini, low_memory=False)
+        # The full-results artifact is not shipped; without it only the
+        # working CSV is written.
+        mn = pd.read_csv(mini, low_memory=False) if os.path.exists(mini) else None
         n = len(df)
-        assert n == n_expect == len(mn), (n, n_expect, len(mn))
-        # artifact rows must line up with working rows
-        same_q = (df["question"].astype(str).map(lambda s: " ".join(s.split()))
-                  .eq(mn["question"].astype(str).map(lambda s: " ".join(s.split())))).sum()
-        print(f"\n{'='*74}\n{ds.upper()}-Union  n={n}   "
-              f"(artifact rows aligned: {same_q}/{n})\n{'='*74}")
-        assert same_q == n, "artifact CSV row order does not match working CSV"
+        assert n == n_expect, (n, n_expect)
+        if mn is not None:
+            assert len(mn) == n, (len(mn), n)
+            # artifact rows must line up with working rows
+            same_q = (df["question"].astype(str).map(lambda s: " ".join(s.split()))
+                      .eq(mn["question"].astype(str).map(lambda s: " ".join(s.split())))).sum()
+            print(f"\n{'='*74}\n{ds.upper()}-Union  n={n}   "
+                  f"(artifact rows aligned: {same_q}/{n})\n{'='*74}")
+            assert same_q == n, "artifact CSV row order does not match working CSV"
+        else:
+            print(f"\n{'='*74}\n{ds.upper()}-Union  n={n}   "
+                  f"(no {os.path.basename(mini)}; writing the working CSV only)\n{'='*74}")
 
         gold_sql = df["SQL"].astype(str).tolist()
         gold_cache, gold_set = {}, {}
@@ -182,15 +190,19 @@ def main():
                 df[arm.sql_col] = preds
                 df[arm.result_col] = s_vec
                 df[arm.result_col + "_lenient"] = l_vec
-                stem = f"autolink_sql_{infix + '_' if infix else ''}ds"
-                mn[stem] = preds
-                mn[stem + "_result"] = s_vec
-                mn[stem + "_result_lenient"] = l_vec
+                if mn is not None:
+                    stem = f"autolink_sql_{infix + '_' if infix else ''}ds"
+                    mn[stem] = preds
+                    mn[stem + "_result"] = s_vec
+                    mn[stem + "_result_lenient"] = l_vec
 
         if not a.no_write:
             df.to_csv(work, index=False)
-            mn.to_csv(mini, index=False)
-            print(f"\n  wrote {os.path.basename(work)} and {os.path.basename(mini)}")
+            if mn is not None:
+                mn.to_csv(mini, index=False)
+                print(f"\n  wrote {os.path.basename(work)} and {os.path.basename(mini)}")
+            else:
+                print(f"\n  wrote {os.path.basename(work)}")
 
         # ---------------------------------------------------- significance
         base = labels[0]
