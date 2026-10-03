@@ -155,17 +155,6 @@ BaseSQL, DIN-SQL, MAC-SQL and CSC-SQL share these flags.
 Run any entry point with `--help` for the full list. The shared flags are
 defined in [`_common/cli_common.py`](_common/cli_common.py).
 
-## Scoring
-
-BaseSQL, DIN-SQL, MAC-SQL and CSC-SQL use `compare_sql` in
-[`_common/evaluate.py`](_common/evaluate.py). It runs the predicted and the
-gold SQL on the same database. They match when they return the same set of
-rows. Errors and timeouts (15 s) count as wrong.
-
-AutoLink uses its own comparator, `compare_pandas_table` in
-[`AutoLink/run/sql_selection.py`](AutoLink/run/sql_selection.py), which its
-prompt is written for. Its EX column ends in `_result_lenient`.
-
 ## Datasets
 
 | | Databases | Tables | Test / history questions |

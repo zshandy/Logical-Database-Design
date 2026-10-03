@@ -5,8 +5,6 @@ vendored sql_selection.py (Spider 2.0's official comparator, which is what
 AutoLink's own selection step uses). Every gold column vector must appear in
 the prediction; extra predicted columns are tolerated.
 
-No union with a strict metric, no reimplementation -- just the shipped rule.
-
     python score_shipped.py
     python score_shipped.py --dataset bird
 """

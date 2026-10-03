@@ -7,17 +7,15 @@ One pass per dataset:
      found for the specified query.") for failed rows and export the error
      string as the prediction (108 rows across the 16 arms).
   2. execute every gold query ONCE and cache it; 8 arms share it.
-  3. score each arm two ways:
-        _result          set(pred) == set(gold)          (compare_sql semantics)
-        _result_lenient  compare_pandas_table(pred,gold) (AutoLink's shipped
-                         comparator, imported, NO union with strict)
-  4. write SQL + both result columns into csvs/nl2sql_<ds>.csv and, when it
+  3. score each arm with AutoLink's own comparator, compare_pandas_table,
+     imported from sql_selection.py.
+  4. write SQL + the _result column into csvs/nl2sql_<ds>.csv and, when it
      exists, into csvs/nl2sql_<ds>_min.csv (artifact naming:
      autolink_sql[_CFG]_ds), the full-results copy kept alongside the working
      CSV. It is not shipped -- recreate_database/nl2sql_<ds>.csv carries
      inputs only -- so on a fresh clone only the working CSV is written.
   5. report EX, delta vs baseline, McNemar vs baseline, and the full pairwise
-     McNemar p-value grid, on the shipped comparator.
+     McNemar p-value grid.
 
     python final_export_and_stats.py
     python final_export_and_stats.py --dataset bird --no_write
@@ -79,22 +77,6 @@ def run_sql(db, sql):
                 pass
 
 
-def rowset(df):
-    """Normalised row set for compare_sql-style equality."""
-    out = set()
-    for r in df.itertuples(index=False, name=None):
-        v = []
-        for x in r:
-            if isinstance(x, bytes):
-                x = x.decode("utf-8", "replace")
-            # NaN/inf are floats but not integral; int() raises on them.
-            if isinstance(x, float) and np.isfinite(x) and x == int(x):
-                x = int(x)
-            v.append(x)
-        out.add(tuple(v))
-    return out
-
-
 def mcnemar(a, b):
     """Exact McNemar on paired 0/1 vectors. Returns (b01, b10, p)."""
     a, b = np.asarray(a, bool), np.asarray(b, bool)
@@ -139,9 +121,9 @@ def main():
                   f"(no {os.path.basename(mini)}; writing the working CSV only)\n{'='*74}")
 
         gold_sql = df["SQL"].astype(str).tolist()
-        gold_cache, gold_set = {}, {}
+        gold_cache = {}
 
-        strict_v, lenient_v, labels = {}, {}, []
+        ex_v, labels = {}, []
         for label, kw, infix in ARMS:
             arm = C.Arm(dataset=ds, **kw)
             sel = os.path.join(arm.log_path, "sql_selection", "final")
@@ -154,47 +136,41 @@ def main():
             if not os.path.exists(db):
                 db = C.MERGED_DB[ds]
 
-            preds, s_vec, l_vec = [], [], []
+            preds, vec = [], []
             for i in range(n):
                 f = os.path.join(sel, f"local{i:06d}", "selected.sql")
                 pred = (open(f, encoding="utf-8", errors="replace").read().strip()
                         if os.path.exists(f) else "")
                 preds.append(pred)
                 if i not in gold_cache:
-                    g = run_sql(db, gold_sql[i])
-                    gold_cache[i] = g
-                    gold_set[i] = rowset(g) if g is not None else None
+                    gold_cache[i] = run_sql(db, gold_sql[i])
                 g = gold_cache[i]
                 if not pred or g is None:
-                    s_vec.append(0); l_vec.append(0); continue
+                    vec.append(0); continue
                 p = run_sql(db, pred)
                 if p is None:
-                    s_vec.append(0); l_vec.append(0); continue
-                s_vec.append(int(rowset(p) == gold_set[i]))
+                    vec.append(0); continue
                 if g.empty:
-                    l_vec.append(int(p.empty))
+                    vec.append(int(p.empty))
                 elif p.empty:
-                    l_vec.append(0)
+                    vec.append(0)
                 else:
                     try:
-                        l_vec.append(int(bool(compare_pandas_table(p, g, ignore_order=True))))
+                        vec.append(int(bool(compare_pandas_table(p, g, ignore_order=True))))
                     except Exception:
-                        l_vec.append(0)
+                        vec.append(0)
 
-            strict_v[label], lenient_v[label] = s_vec, l_vec
+            ex_v[label] = vec
             labels.append(label)
-            print(f"  {label:8} strict {100*np.mean(s_vec):6.2f}%   "
-                  f"shipped {100*np.mean(l_vec):6.2f}%")
+            print(f"  {label:8} EX {100*np.mean(vec):6.2f}%")
 
             if not a.no_write:
                 df[arm.sql_col] = preds
-                df[arm.result_col] = s_vec
-                df[arm.result_col + "_lenient"] = l_vec
+                df[arm.result_col] = vec
                 if mn is not None:
                     stem = f"autolink_sql_{infix + '_' if infix else ''}ds"
                     mn[stem] = preds
-                    mn[stem + "_result"] = s_vec
-                    mn[stem + "_result_lenient"] = l_vec
+                    mn[stem + "_result"] = vec
 
         if not a.no_write:
             df.to_csv(work, index=False)
@@ -205,22 +181,25 @@ def main():
                 print(f"\n  wrote {os.path.basename(work)}")
 
         # ---------------------------------------------------- significance
+        if not labels:
+            print("  no complete arm -- nothing to compare")
+            continue
         base = labels[0]
-        print(f"\n  EX / delta / McNemar vs {base}   (AutoLink shipped comparator)")
+        print(f"\n  EX / delta / McNemar vs {base}")
         print(f"    {'arm':8}{'EX':>9}{'delta':>9}{'b01':>6}{'b10':>6}{'p':>11}")
         rows = {}
         for lbl in labels:
-            ex = 100 * np.mean(lenient_v[lbl])
-            d = ex - 100 * np.mean(lenient_v[base])
+            ex = 100 * np.mean(ex_v[lbl])
+            d = ex - 100 * np.mean(ex_v[base])
             if lbl == base:
                 print(f"    {lbl:8}{ex:8.2f}%{'--':>9}{'':>6}{'':>6}{'':>11}")
                 rows[lbl] = dict(ex=ex)
                 continue
-            n01, n10, p = mcnemar(lenient_v[base], lenient_v[lbl])
+            n01, n10, p = mcnemar(ex_v[base], ex_v[lbl])
             print(f"    {lbl:8}{ex:8.2f}%{d:+8.2f} {n01:>6}{n10:>6}{p:>10.4f}{stars(p)}")
             rows[lbl] = dict(ex=ex, delta=d, gained=n01, lost=n10, p=p)
 
-        print(f"\n  pairwise McNemar p (row vs column), shipped comparator")
+        print(f"\n  pairwise McNemar p (row vs column)")
         print("    " + " " * 9 + "".join(f"{l:>9}" for l in labels))
         for r in labels:
             cells = []
@@ -228,12 +207,13 @@ def main():
                 if r == c:
                     cells.append(f"{'--':>9}")
                 else:
-                    _, _, p = mcnemar(lenient_v[r], lenient_v[c])
+                    _, _, p = mcnemar(ex_v[r], ex_v[c])
                     cells.append(f"{p:>9.3f}")
             print(f"    {r:9}" + "".join(cells))
         summary[ds] = rows
 
     out = os.path.join(HERE, "runlogs", "final_stats.json")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
     json.dump(summary, open(out, "w"), indent=2)
     print(f"\nwrote {out}")
 
